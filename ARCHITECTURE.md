@@ -38,6 +38,8 @@ This document captures the current v6 architecture before any app rewrite.
 
 ## Usage data sources
 
+- Provider access now goes through `UsageProviderAdapter` in `claude_usage_tray.py`. Each adapter exposes a provider id/name, display label, local availability check, latest provider-neutral usage snapshot, optional local history import, and current error state.
+- `ClaudeCodeProviderAdapter` is the first adapter. It wraps the existing Claude Code statusline reader and local JSONL scanner without changing the data source policy or reading credentials.
 - Preferred source: `read_statusline_usage()` reads `statusline_latest.json`, unwraps the `raw` object if present, and looks for `rate_limits`/`rate_limit` with `five_hour`/`session` and `seven_day`/`weekly` fields.
 - The statusline reader accepts `used_percentage` or `utilization`, accepts `resets_at` or `reset_at`, and normalizes fractional utilization values from 0..1 to 0..100.
 - Fallback source: `scan_usage()` recursively scans `*.jsonl` files under the configured Claude projects log directory, finds nested `usage` dictionaries, extracts token counts, deduplicates records by request/message/id fields when available, and buckets totals into session, today, week, and all-time windows.
@@ -48,7 +50,7 @@ This document captures the current v6 architecture before any app rewrite.
 - `App.__init__()` builds the UI, starts the tray, immediately calls `refresh()`, starts `_poll()` every 500 ms, and schedules `_scheduled()` based on `refresh_seconds`.
 - `refresh()` is guarded by `_refreshing`; if a scan is already running, a new refresh request returns early.
 - Each refresh starts a short spin animation, then launches `_scan_thread()` on a daemon thread.
-- `_scan_thread()` reads statusline data and scans local usage, then pushes `(RateLimitUsage, totals)` into a queue. Failures are logged and converted into an error `RateLimitUsage` plus empty totals.
+- `_scan_thread()` asks the configured provider adapter for availability, latest usage, and imported local history, then pushes `(RateLimitUsage, totals)` into a queue. Failures are logged and converted into an error `RateLimitUsage` plus empty totals.
 - `_poll()` runs on Tk's event loop, drains queued scan results, clears `_refreshing`, and calls `_update()`.
 - `_update()` stores the latest data, computes effective percentages, updates main labels, status text, tray title/icon, usage panel, and floating widget.
 

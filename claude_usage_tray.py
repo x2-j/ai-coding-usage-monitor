@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json, os, queue, threading, time, math, webbrowser
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -88,6 +89,44 @@ class RateLimitUsage:
     @classmethod
     def from_record(cls, record: UsageRecord) -> "RateLimitUsage":
         return cls(record.session_usage_pct, record.session_reset_time, record.weekly_usage_pct, record.weekly_reset_time, record.source, record.error)
+
+@dataclass
+class ProviderAvailability:
+    available: bool
+    source: str
+    message: Optional[str] = None
+
+@dataclass
+class ProviderUsageSnapshot:
+    record: UsageRecord
+    totals: Dict[str, UsageTotals]
+
+class UsageProviderAdapter(ABC):
+    provider_id: str
+    provider_name: str
+    display_label: str
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.cfg = cfg
+        self.error_state: Optional[str] = None
+
+    @abstractmethod
+    def check_availability(self) -> ProviderAvailability:
+        """Return whether the provider has a usable local data source."""
+
+    @abstractmethod
+    def latest_usage_snapshot(self) -> UsageRecord:
+        """Return the latest provider-neutral usage snapshot."""
+
+    def import_history(self) -> Dict[str, UsageTotals]:
+        """Optionally import local history into provider-neutral token totals."""
+        return {k: UsageTotals() for k in ["session", "today", "week", "all"]}
+
+    def collect_usage_snapshot(self) -> ProviderUsageSnapshot:
+        return ProviderUsageSnapshot(
+            record=self.latest_usage_snapshot(),
+            totals=self.import_history(),
+        )
 
 @dataclass
 class BurnRateProjection:
@@ -522,6 +561,28 @@ def read_statusline_record() -> UsageRecord:
 def read_statusline_usage() -> RateLimitUsage:
     return RateLimitUsage.from_record(read_statusline_record())
 
+class ClaudeCodeProviderAdapter(UsageProviderAdapter):
+    provider_id = "claude_code"
+    provider_name = "Anthropic"
+    display_label = "Claude Code"
+
+    def check_availability(self) -> ProviderAvailability:
+        statusline_exists = STATUSLINE_LATEST.exists()
+        log_root = Path(self.cfg.get("claude_log_dir") or DEFAULT_CLAUDE_LOG_DIR).expanduser()
+        if statusline_exists:
+            return ProviderAvailability(True, "Claude Code statusline", "Statusline capture file is available.")
+        if log_root.exists():
+            return ProviderAvailability(True, "Claude Code local logs", "Local Claude Code logs are available for estimates.")
+        return ProviderAvailability(False, "Claude Code", "No statusline capture or local Claude Code log folder found.")
+
+    def latest_usage_snapshot(self) -> UsageRecord:
+        record = read_statusline_record()
+        self.error_state = record.error
+        return record
+
+    def import_history(self) -> Dict[str, UsageTotals]:
+        return scan_usage(self.cfg)
+
 def make_icon(angle: int = 0, session_pct: float = 0.0):
     if Image is None: return None
     img = Image.new("RGBA", (64,64), (0,0,0,0)); d = ImageDraw.Draw(img)
@@ -539,6 +600,7 @@ def make_icon(angle: int = 0, session_pct: float = 0.0):
 class App:
     def __init__(self):
         self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("760x860")
+        self.provider: UsageProviderAdapter = ClaudeCodeProviderAdapter(self.config)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading...")
         self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
@@ -624,8 +686,12 @@ class App:
             self._update_widget_logo(spinning=False)
     def _scan_thread(self):
         try:
-            record = read_statusline_record()
-            totals = scan_usage(self.config)
+            self.provider.cfg = self.config
+            availability = self.provider.check_availability()
+            if not availability.available:
+                log(f"{self.provider.display_label} unavailable: {availability.message}")
+            snapshot = self.provider.collect_usage_snapshot()
+            record, totals = snapshot.record, snapshot.totals
             append_usage_snapshot(record, totals, self.config)
             rate = RateLimitUsage.from_record(record)
             history = query_usage_last_7_days()
