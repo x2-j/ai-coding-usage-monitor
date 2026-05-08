@@ -194,30 +194,34 @@ impl Store {
         Ok(())
     }
 
-    pub fn history_points(&self, hours: i64) -> Result<Vec<ChartPoint>, String> {
+    pub fn history_points(&self, hours: i64, provider_id: Option<&str>) -> Result<Vec<ChartPoint>, String> {
         let conn = self.connect()?;
         let cutoff = (Utc::now() - Duration::hours(hours)).to_rfc3339();
         let mut stmt = conn
             .prepare(
                 r#"
-                SELECT timestamp_utc, session_usage_percent, weekly_usage_percent,
+                SELECT COALESCE(provider_id, 'unknown'), COALESCE(provider_name, 'Provider'),
+                       timestamp_utc, session_usage_percent, weekly_usage_percent,
                        total_tokens, input_tokens,
                        output_tokens
                 FROM usage_snapshots
                 WHERE timestamp_utc >= ?1
+                  AND (?2 IS NULL OR provider_id = ?2)
                 ORDER BY timestamp_utc ASC
                 "#,
             )
             .map_err(|e| format!("Could not prepare history query: {e}"))?;
         let rows = stmt
-            .query_map([cutoff], |row| {
+            .query_map(params![cutoff, provider_id], |row| {
                 Ok(ChartPoint {
-                    timestamp_utc: row.get(0)?,
-                    session_usage_percent: row.get(1)?,
-                    weekly_usage_percent: row.get(2)?,
-                    session_tokens: row.get(3)?,
-                    input_tokens: row.get(4)?,
-                    output_tokens: row.get(5)?,
+                    provider_id: row.get(0)?,
+                    provider_name: row.get(1)?,
+                    timestamp_utc: row.get(2)?,
+                    session_usage_percent: row.get(3)?,
+                    weekly_usage_percent: row.get(4)?,
+                    session_tokens: row.get(5)?,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
                 })
             })
             .map_err(|e| format!("Could not query history: {e}"))?;

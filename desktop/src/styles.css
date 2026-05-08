@@ -35,13 +35,18 @@ button:hover { background: #3a4050; }
 button:disabled { opacity: .6; cursor: default; }
 .shell {
   min-height: 100vh;
-  padding: 18px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+  padding: 15px;
 }
+.shell > section, .shell > .grid { margin: 15px 0; }
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+  margin-bottom: 15px;
 }
 h1, h2, h3, p { margin-top: 0; }
 h1 { font-size: 22px; margin-bottom: 4px; }
@@ -51,7 +56,7 @@ h3 { font-size: 13px; color: var(--muted); }
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 18px 0;
+  margin: 15px 0;
 }
 .pill {
   max-width: 360px;
@@ -67,12 +72,13 @@ h3 { font-size: 13px; color: var(--muted); }
   border: 1px solid var(--border);
   background: var(--panel);
   border-radius: 8px;
-  padding: 12px;
-  margin: 12px 0;
+  padding: 15px;
+  margin: 15px 0;
 }
 .grid {
   display: grid;
-  gap: 12px;
+  gap: 15px;
+  min-width: 0;
 }
 .grid.two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -81,7 +87,8 @@ h3 { font-size: 13px; color: var(--muted); }
   border: 1px solid var(--border);
   background: var(--surface);
   border-radius: 8px;
-  padding: 14px;
+  padding: 15px;
+  min-width: 0;
 }
 .metric {
   display: flex;
@@ -100,14 +107,40 @@ h3 { font-size: 13px; color: var(--muted); }
 .charts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 15px;
 }
 .chart {
   min-width: 0;
+  width: 100%;
   border: 1px solid var(--border);
   background: var(--panel);
   border-radius: 8px;
-  padding: 10px;
+  padding: 15px;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 15px;
+  margin-bottom: 15px;
+  color: var(--muted);
+}
+.chart-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-right: 6px;
+  background: var(--series-color);
+}
+.recharts-default-tooltip {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  color: var(--text) !important;
+}
+.recharts-tooltip-label, .recharts-tooltip-item {
+  color: var(--text) !important;
 }
 table {
   width: 100%;

@@ -34,9 +34,14 @@ pub fn collect_active_provider(settings: &AppSettings, data_dir: &Path) -> Optio
         .iter()
         .find(|provider| provider.provider_id == settings.selected_provider_id)
         .or_else(|| visible.first())?;
-    match selected.provider_id.as_str() {
+    collect_provider(&selected.provider_id, settings, data_dir)
+}
+
+pub fn collect_provider(provider_id: &str, settings: &AppSettings, data_dir: &Path) -> Option<ProviderResult> {
+    match provider_id {
         CODEX_ID => Some(collect_codex(settings)),
-        _ => Some(collect_claude(settings, data_dir)),
+        CLAUDE_ID => Some(collect_claude(settings, data_dir)),
+        _ => None,
     }
 }
 
@@ -131,7 +136,7 @@ pub fn collect_claude(settings: &AppSettings, data_dir: &Path) -> ProviderResult
 pub fn collect_codex(settings: &AppSettings) -> ProviderResult {
     let (latest, totals) = scan_codex_logs(settings);
     let mut snapshot = latest.unwrap_or_else(|| UsageSnapshot::error(CODEX_ID, "OpenAI", "No Codex token usage records found.".to_string()));
-    apply_token_totals(&mut snapshot, &totals, settings, false);
+    apply_token_totals(&mut snapshot, &totals, settings, true);
     ProviderResult { snapshot, totals }
 }
 
@@ -145,22 +150,29 @@ fn apply_token_totals(
     let week = totals.get("week").cloned().unwrap_or_else(UsageTotals::empty);
     let session_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
     let weekly_tokens = if settings.include_cache_tokens { week.total_tokens } else { week.visible_tokens };
+    let mut estimated_any = false;
     if estimate_percentages && snapshot.session_usage_percent.is_none() {
         snapshot.session_usage_percent = percentage(session_tokens, settings.session_budget_tokens);
         snapshot.is_estimate = true;
+        estimated_any = snapshot.session_usage_percent.is_some();
     }
     if estimate_percentages && snapshot.weekly_usage_percent.is_none() {
         snapshot.weekly_usage_percent = percentage(weekly_tokens, settings.weekly_budget_tokens);
         snapshot.is_estimate = true;
+        estimated_any = estimated_any || snapshot.weekly_usage_percent.is_some();
     }
-    if !estimate_percentages && snapshot.session_usage_percent.is_none() && snapshot.weekly_usage_percent.is_none() {
-        snapshot.raw_limit_name = Some("No exact local limit percentage available".to_string());
+    if estimated_any {
+        snapshot.raw_limit_name = Some("Local fallback estimate from token totals and configured budgets".to_string());
     }
     snapshot.input_tokens = session.input_tokens;
     snapshot.output_tokens = session.output_tokens;
     snapshot.cache_read_tokens = session.cache_read_tokens;
     snapshot.cache_write_tokens = session.cache_write_tokens;
     snapshot.total_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
+    if snapshot.error_state.is_some() && snapshot.total_tokens > 0 && estimated_any {
+        snapshot.error_state = None;
+        snapshot.source = "local token budget estimate".to_string();
+    }
 }
 
 fn percentage(tokens: i64, budget: i64) -> Option<f64> {
@@ -490,25 +502,26 @@ mod tests {
     use crate::config::default_settings;
 
     #[test]
-    fn codex_token_totals_do_not_become_fake_limit_percentages() {
+    fn codex_token_totals_become_labelled_fallback_percentages() {
         let mut settings = default_settings();
         settings.session_budget_tokens = 1_000;
         settings.weekly_budget_tokens = 1_000;
         let mut totals = empty_totals_map();
-        totals.get_mut("session").unwrap().input_tokens = 25_000;
-        totals.get_mut("session").unwrap().visible_tokens = 25_000;
-        totals.get_mut("session").unwrap().total_tokens = 25_000;
-        totals.get_mut("week").unwrap().input_tokens = 50_000;
-        totals.get_mut("week").unwrap().visible_tokens = 50_000;
-        totals.get_mut("week").unwrap().total_tokens = 50_000;
+        totals.get_mut("session").unwrap().input_tokens = 250;
+        totals.get_mut("session").unwrap().visible_tokens = 250;
+        totals.get_mut("session").unwrap().total_tokens = 250;
+        totals.get_mut("week").unwrap().input_tokens = 500;
+        totals.get_mut("week").unwrap().visible_tokens = 500;
+        totals.get_mut("week").unwrap().total_tokens = 500;
         let mut snapshot = UsageSnapshot::error(CODEX_ID, "OpenAI", "test".to_string());
 
-        apply_token_totals(&mut snapshot, &totals, &settings, false);
+        apply_token_totals(&mut snapshot, &totals, &settings, true);
 
-        assert_eq!(snapshot.session_usage_percent, None);
-        assert_eq!(snapshot.weekly_usage_percent, None);
-        assert_eq!(snapshot.input_tokens, 25_000);
-        assert_eq!(snapshot.raw_limit_name.as_deref(), Some("No exact local limit percentage available"));
+        assert_eq!(snapshot.session_usage_percent, Some(25.0));
+        assert_eq!(snapshot.weekly_usage_percent, Some(50.0));
+        assert_eq!(snapshot.input_tokens, 250);
+        assert_eq!(snapshot.error_state, None);
+        assert_eq!(snapshot.raw_limit_name.as_deref(), Some("Local fallback estimate from token totals and configured budgets"));
     }
 
     #[test]

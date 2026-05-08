@@ -10,7 +10,7 @@ use crate::config::{default_app_data_dir, sanitize_settings};
 use crate::forecast::{calculate_burn, detect_spikes};
 use crate::import_legacy::import_legacy_if_needed;
 use crate::models::{AppSettings, BurnRateProjection, MonitorState};
-use crate::providers::{collect_active_provider, provider_availability};
+use crate::providers::{collect_active_provider, collect_provider, provider_availability};
 use crate::storage::Store;
 use std::collections::BTreeMap;
 use std::fs;
@@ -77,25 +77,45 @@ impl AppCore {
             latest_snapshot = Some(result.snapshot);
         }
 
-        let mut history = self.store.history_points(5)?;
-        if history.is_empty() {
+        let active_provider_id = latest_snapshot.as_ref().map(|s| s.provider_id.clone());
+        if force_refresh {
+            for provider in providers.iter().filter(|p| p.has_data) {
+                if Some(provider.provider_id.as_str()) == active_provider_id.as_deref() {
+                    continue;
+                }
+                if let Some(result) = collect_provider(&provider.provider_id, &settings, &self.data_dir) {
+                    if result.snapshot.error_state.is_none()
+                        && (result.snapshot.total_tokens > 0
+                            || result.snapshot.session_usage_percent.is_some()
+                            || result.snapshot.weekly_usage_percent.is_some())
+                    {
+                        self.store.append_snapshot(&result.snapshot)?;
+                    }
+                }
+            }
+        }
+
+        let mut history = self.store.history_points(5, None)?;
+        let mut active_history = self.store.history_points(5, active_provider_id.as_deref())?;
+        if active_history.is_empty() {
             if let Some(snapshot) = latest_snapshot.as_ref() {
                 if snapshot.error_state.is_none()
                     && (snapshot.total_tokens > 0 || snapshot.session_usage_percent.is_some() || snapshot.weekly_usage_percent.is_some())
                 {
                     self.store.append_snapshot(snapshot)?;
-                    history = self.store.history_points(5)?;
+                    history = self.store.history_points(5, None)?;
+                    active_history = self.store.history_points(5, active_provider_id.as_deref())?;
                 }
             }
         }
         let mut burn = BTreeMap::new();
         burn.insert(
             "session".to_string(),
-            calculate_burn(&history, "session", latest_snapshot.as_ref().and_then(|s| s.session_usage_percent)),
+            calculate_burn(&active_history, "session", latest_snapshot.as_ref().and_then(|s| s.session_usage_percent)),
         );
         burn.insert(
             "week".to_string(),
-            calculate_burn(&history, "weekly", latest_snapshot.as_ref().and_then(|s| s.weekly_usage_percent)),
+            calculate_burn(&active_history, "weekly", latest_snapshot.as_ref().and_then(|s| s.weekly_usage_percent)),
         );
         if burn.is_empty() {
             burn.insert("session".to_string(), BurnRateProjection::reason("not enough data yet"));
@@ -104,12 +124,12 @@ impl AppCore {
 
         Ok(MonitorState {
             settings,
-            active_provider_id: latest_snapshot.as_ref().map(|s| s.provider_id.clone()),
+            active_provider_id,
             providers,
             latest_snapshot,
             totals,
             burn,
-            spikes: detect_spikes(&history),
+            spikes: detect_spikes(&active_history),
             history,
             app_state,
             status_message,

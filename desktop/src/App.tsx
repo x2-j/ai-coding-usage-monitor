@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -21,6 +19,15 @@ import {
 } from "./api";
 import { installTray, showWindow } from "./tray";
 import type { AppSettings, MonitorState, UsageTotals } from "./types";
+
+const chartColors = ["#ffd97a", "#8bd3ff", "#ac84ff", "#70e0ad"];
+const tooltipStyle = {
+  backgroundColor: "#202124",
+  border: "1px solid var(--border)",
+  borderRadius: "8px",
+  color: "#f4f4f4"
+};
+const tooltipLabelStyle = { color: "#f4f4f4" };
 
 const emptyTotals: UsageTotals = {
   input_tokens: 0,
@@ -47,8 +54,9 @@ function limitValue(n: number | null | undefined) {
   return `${n.toFixed(1)}%`;
 }
 
-function resetLabel(iso: string | null | undefined, value: number | null | undefined) {
+function resetLabel(iso: string | null | undefined, value: number | null | undefined, isEstimate?: boolean) {
   if (value === null || value === undefined || Number.isNaN(value)) return "Limit source unavailable";
+  if (isEstimate && !iso) return "Local fallback estimate";
   return `Reset ${countdown(iso)}`;
 }
 
@@ -83,6 +91,10 @@ function startWindowDrag() {
   getCurrentWindow().startDragging().catch(() => undefined);
 }
 
+function chartKey(providerId: string, metric: string) {
+  return `${providerId.replace(/[^a-zA-Z0-9_]/g, "_")}_${metric}`;
+}
+
 export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,17 +120,49 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [state?.settings.refresh_seconds]);
 
-  const chartData = useMemo(
-    () =>
-      (state?.history || []).map((point) => ({
-        ...point,
+  const providerSeries = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const provider of state?.providers || []) {
+      labels.set(provider.provider_id, provider.display_label);
+    }
+    for (const point of state?.history || []) {
+      if (!labels.has(point.provider_id)) {
+        labels.set(point.provider_id, point.provider_name || point.provider_id);
+      }
+    }
+    return Array.from(labels, ([providerId, label], index) => ({
+      providerId,
+      label,
+      color: chartColors[index % chartColors.length],
+      usageKey: chartKey(providerId, "session_usage_percent"),
+      weeklyKey: chartKey(providerId, "weekly_usage_percent"),
+      tokenKey: chartKey(providerId, "session_tokens")
+    })).filter((series) => (state?.history || []).some((point) => point.provider_id === series.providerId));
+  }, [state]);
+
+  const chartData = useMemo(() => {
+    const rows = new Map<string, Record<string, number | string | null>>();
+    for (const point of state?.history || []) {
+      const key = point.timestamp_utc;
+      const row = rows.get(key) || {
+        timestamp_utc: point.timestamp_utc,
         label: timeLabel(point.timestamp_utc)
-      })),
-    [state]
-  );
+      };
+      row[chartKey(point.provider_id, "session_usage_percent")] = point.session_usage_percent;
+      row[chartKey(point.provider_id, "weekly_usage_percent")] = point.weekly_usage_percent;
+      row[chartKey(point.provider_id, "session_tokens")] = point.session_tokens;
+      rows.set(key, row);
+    }
+    return Array.from(rows.values()).sort((a, b) => String(a.timestamp_utc).localeCompare(String(b.timestamp_utc)));
+  }, [state]);
 
   if (!state) {
-    return <main className="shell"><p className="status">Loading usage data...</p>{error && <p className="error">{error}</p>}</main>;
+    return (
+      <main className="shell">
+        <p className="status">{error ? "Could not load usage data." : "Loading usage data..."}</p>
+        {error && <section className="notice error">{error}</section>}
+      </main>
+    );
   }
 
   if (windowLabel === "widget") {
@@ -160,8 +204,8 @@ export default function App() {
       {error && <section className="notice error">{error}</section>}
 
       <section className="grid two">
-        <MetricCard title="Session" value={limitValue(snapshot?.session_usage_percent)} sub={resetLabel(snapshot?.session_reset_at, snapshot?.session_usage_percent)} />
-        <MetricCard title="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} sub={resetLabel(snapshot?.weekly_reset_at, snapshot?.weekly_usage_percent)} />
+        <MetricCard title="Session" value={limitValue(snapshot?.session_usage_percent)} sub={resetLabel(snapshot?.session_reset_at, snapshot?.session_usage_percent, snapshot?.is_estimate)} />
+        <MetricCard title="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} sub={resetLabel(snapshot?.weekly_reset_at, snapshot?.weekly_usage_percent, snapshot?.is_estimate)} />
       </section>
 
       <section className="panel">
@@ -192,25 +236,61 @@ export default function App() {
 
       <section className="panel">
         <h2>Rolling 5-hour graphs</h2>
+        {providerSeries.length > 1 && (
+          <div className="chart-legend">
+            {providerSeries.map((series) => <span key={series.providerId} style={{ "--series-color": series.color } as React.CSSProperties}>{series.label}</span>)}
+          </div>
+        )}
         <div className="charts">
           <Chart title="Usage %" data={chartData}>
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" domain={[0, 100]} />
-              <Tooltip />
-              <Line type="monotone" dataKey="session_usage_percent" stroke="var(--accent)" dot={chartData.length < 2} connectNulls />
-              <Line type="monotone" dataKey="weekly_usage_percent" stroke="var(--blue)" dot={chartData.length < 2} connectNulls />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
+              {providerSeries.map((series) => (
+                <Line
+                  key={series.usageKey}
+                  name={`${series.label} session`}
+                  type="monotone"
+                  dataKey={series.usageKey}
+                  stroke={series.color}
+                  dot={chartData.length < 2}
+                  connectNulls
+                />
+              ))}
+              {providerSeries.map((series) => (
+                <Line
+                  key={series.weeklyKey}
+                  name={`${series.label} weekly`}
+                  type="monotone"
+                  dataKey={series.weeklyKey}
+                  stroke={series.color}
+                  strokeDasharray="4 4"
+                  dot={false}
+                  connectNulls
+                />
+              ))}
             </LineChart>
           </Chart>
           <Chart title="Session Tokens" data={chartData}>
-            <AreaChart data={chartData}>
+            <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" />
-              <Tooltip />
-              <Area type="monotone" dataKey="session_tokens" stroke="var(--warn)" fill="var(--accent-soft)" />
-            </AreaChart>
+              <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
+              {providerSeries.map((series) => (
+                <Line
+                  key={series.tokenKey}
+                  name={`${series.label} tokens`}
+                  type="monotone"
+                  dataKey={series.tokenKey}
+                  stroke={series.color}
+                  dot={chartData.length < 2}
+                  connectNulls
+                />
+              ))}
+            </LineChart>
           </Chart>
         </div>
       </section>
@@ -261,8 +341,8 @@ function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void
         <p>{limitValue(snapshot?.session_usage_percent)} session | {limitValue(snapshot?.weekly_usage_percent)} week</p>
       ) : (
         <>
-          <WidgetRow label="Session" value={limitValue(snapshot?.session_usage_percent)} reset={snapshot?.session_usage_percent == null ? "no limit data" : countdown(snapshot?.session_reset_at)} />
-          <WidgetRow label="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} reset={snapshot?.weekly_usage_percent == null ? "no limit data" : countdown(snapshot?.weekly_reset_at)} />
+          <WidgetRow label="Session" value={limitValue(snapshot?.session_usage_percent)} reset={snapshot?.session_usage_percent == null ? "no limit data" : snapshot?.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot?.session_reset_at)} />
+          <WidgetRow label="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} reset={snapshot?.weekly_usage_percent == null ? "no limit data" : snapshot?.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot?.weekly_reset_at)} />
           {mode === "full" && <small>{state.status_message}</small>}
         </>
       )}

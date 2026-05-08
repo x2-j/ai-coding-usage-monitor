@@ -156,6 +156,8 @@ pub struct AppSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartPoint {
+    pub provider_id: String,
+    pub provider_name: String,
     pub timestamp_utc: String,
     pub session_usage_percent: Option<f64>,
     pub weekly_usage_percent: Option<f64>,

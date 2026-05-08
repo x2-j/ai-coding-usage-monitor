@@ -82,6 +82,8 @@ export interface AppSettings {
 }
 
 export interface ChartPoint {
+  provider_id: string;
+  provider_name: string;
   timestamp_utc: string;
   session_usage_percent: number | null;
   weekly_usage_percent: number | null;
