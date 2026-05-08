@@ -11,6 +11,8 @@ use walkdir::WalkDir;
 
 const CLAUDE_ID: &str = "claude_code";
 const CODEX_ID: &str = "openai_codex_cli";
+const CODEX_SESSION_FALLBACK_BUDGET_TOKENS: i64 = 350_000_000;
+const CODEX_WEEKLY_FALLBACK_BUDGET_TOKENS: i64 = 3_500_000_000;
 
 pub struct ProviderResult {
     pub snapshot: UsageSnapshot,
@@ -22,19 +24,6 @@ pub fn provider_availability(settings: &AppSettings, data_dir: &Path) -> Vec<Pro
         claude_availability(settings, data_dir),
         codex_availability(settings),
     ]
-}
-
-pub fn collect_active_provider(settings: &AppSettings, data_dir: &Path) -> Option<ProviderResult> {
-    let providers = provider_availability(settings, data_dir);
-    let visible: Vec<_> = providers.into_iter().filter(|p| p.has_data).collect();
-    if visible.is_empty() {
-        return None;
-    }
-    let selected = visible
-        .iter()
-        .find(|provider| provider.provider_id == settings.selected_provider_id)
-        .or_else(|| visible.first())?;
-    collect_provider(&selected.provider_id, settings, data_dir)
 }
 
 pub fn collect_provider(provider_id: &str, settings: &AppSettings, data_dir: &Path) -> Option<ProviderResult> {
@@ -137,6 +126,7 @@ pub fn collect_codex(settings: &AppSettings) -> ProviderResult {
     let (latest, totals) = scan_codex_logs(settings);
     let mut snapshot = latest.unwrap_or_else(|| UsageSnapshot::error(CODEX_ID, "OpenAI", "No Codex token usage records found.".to_string()));
     apply_token_totals(&mut snapshot, &totals, settings, true);
+    apply_codex_fallback_budgets(&mut snapshot, &totals, settings);
     ProviderResult { snapshot, totals }
 }
 
@@ -181,6 +171,27 @@ fn percentage(tokens: i64, budget: i64) -> Option<f64> {
     } else {
         Some(((tokens as f64 / budget as f64) * 100.0).clamp(0.0, 100.0))
     }
+}
+
+fn apply_codex_fallback_budgets(
+    snapshot: &mut UsageSnapshot,
+    totals: &BTreeMap<String, UsageTotals>,
+    settings: &AppSettings,
+) {
+    if !snapshot.is_estimate {
+        return;
+    }
+    let session = totals.get("session").cloned().unwrap_or_else(UsageTotals::empty);
+    let week = totals.get("week").cloned().unwrap_or_else(UsageTotals::empty);
+    let session_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
+    let weekly_tokens = if settings.include_cache_tokens { week.total_tokens } else { week.visible_tokens };
+    let session_budget = settings.session_budget_tokens.max(CODEX_SESSION_FALLBACK_BUDGET_TOKENS);
+    let weekly_budget = settings.weekly_budget_tokens.max(CODEX_WEEKLY_FALLBACK_BUDGET_TOKENS);
+    snapshot.session_usage_percent = percentage(session_tokens, session_budget);
+    snapshot.weekly_usage_percent = percentage(weekly_tokens, weekly_budget);
+    snapshot.raw_limit_name = Some(
+        "OpenAI local fallback estimate from token counters and Codex-sized configured budgets".to_string(),
+    );
 }
 
 fn snapshot_from_statusline(value: &Value) -> UsageSnapshot {
@@ -517,11 +528,13 @@ mod tests {
 
         apply_token_totals(&mut snapshot, &totals, &settings, true);
 
-        assert_eq!(snapshot.session_usage_percent, Some(25.0));
-        assert_eq!(snapshot.weekly_usage_percent, Some(50.0));
+        apply_codex_fallback_budgets(&mut snapshot, &totals, &settings);
+
+        assert!(snapshot.session_usage_percent.unwrap() < 1.0);
+        assert!(snapshot.weekly_usage_percent.unwrap() < 1.0);
         assert_eq!(snapshot.input_tokens, 250);
         assert_eq!(snapshot.error_state, None);
-        assert_eq!(snapshot.raw_limit_name.as_deref(), Some("Local fallback estimate from token totals and configured budgets"));
+        assert_eq!(snapshot.raw_limit_name.as_deref(), Some("OpenAI local fallback estimate from token counters and Codex-sized configured budgets"));
     }
 
     #[test]

@@ -29,7 +29,7 @@
         "title": "AI Usage",
         "url": "/",
         "width": 260,
-        "height": 150,
+        "height": 260,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,

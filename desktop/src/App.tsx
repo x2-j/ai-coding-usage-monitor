@@ -18,7 +18,7 @@ import {
   setupStatusline
 } from "./api";
 import { installTray, showWindow } from "./tray";
-import type { AppSettings, MonitorState, UsageTotals } from "./types";
+import type { AppSettings, MonitorState, ProviderUsage, UsageTotals } from "./types";
 
 const chartColors = ["#ffd97a", "#8bd3ff", "#ac84ff", "#70e0ad"];
 const tooltipStyle = {
@@ -100,6 +100,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [windowLabel, setWindowLabel] = useState("main");
   const [saving, setSaving] = useState(false);
+  const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(() => new Set());
+  const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     try {
@@ -140,6 +142,11 @@ export default function App() {
     })).filter((series) => (state?.history || []).some((point) => point.provider_id === series.providerId));
   }, [state]);
 
+  const visibleProviderSeries = useMemo(
+    () => providerSeries.filter((series) => !hiddenProviders.has(series.providerId)),
+    [providerSeries, hiddenProviders]
+  );
+
   const chartData = useMemo(() => {
     const rows = new Map<string, Record<string, number | string | null>>();
     for (const point of state?.history || []) {
@@ -168,10 +175,6 @@ export default function App() {
   if (windowLabel === "widget") {
     return <WidgetView state={state} onOpen={() => showWindow("main")} />;
   }
-
-  const snapshot = state.latest_snapshot;
-  const session = state.totals.session || emptyTotals;
-  const week = state.totals.week || emptyTotals;
 
   async function updateSettings(next: AppSettings) {
     setSaving(true);
@@ -203,44 +206,29 @@ export default function App() {
       {state.app_state === "paused" && <section className="notice">No provider usage data found yet. Providers without local usage data are hidden.</section>}
       {error && <section className="notice error">{error}</section>}
 
-      <section className="grid two">
-        <MetricCard title="Session" value={limitValue(snapshot?.session_usage_percent)} sub={resetLabel(snapshot?.session_reset_at, snapshot?.session_usage_percent, snapshot?.is_estimate)} />
-        <MetricCard title="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} sub={resetLabel(snapshot?.weekly_reset_at, snapshot?.weekly_usage_percent, snapshot?.is_estimate)} />
-      </section>
-
-      <section className="panel">
-        <h2>Provider Usage Limits</h2>
-        <p className="big">
-          {snapshot
-            ? `${snapshot.provider_name || "Provider"} ${snapshot.session_usage_percent === null && snapshot.weekly_usage_percent === null ? "local token tracking" : snapshot.is_estimate ? "local estimate" : "statusline"}`
-            : "No active provider"}
-        </p>
-        <p>
-          Source: {snapshot?.source || "none"} {snapshot?.model_name ? `| Model: ${snapshot.model_name}` : ""}
-        </p>
-        {snapshot?.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
-        {snapshot?.error_state && <p className="error">{snapshot.error_state}</p>}
-        <div className="grid two">
-          <div>
-            <strong>Session forecast</strong>
-            <p>{duration(state.burn.session.minutes_until_limit, state.burn.session.reason)}</p>
-            <small>{fmt(state.burn.session.rate_per_hour)} tokens/hr | {pct(state.burn.session.pct_per_hour)}/hr</small>
-          </div>
-          <div>
-            <strong>Weekly forecast</strong>
-            <p>{duration(state.burn.week.minutes_until_limit, state.burn.week.reason)}</p>
-            <small>{fmt(state.burn.week.rate_per_hour)} tokens/hr | {pct(state.burn.week.pct_per_hour)}/hr</small>
-          </div>
-        </div>
-      </section>
-
       <section className="panel">
         <h2>Rolling 5-hour graphs</h2>
-        {providerSeries.length > 1 && (
-          <div className="chart-legend">
-            {providerSeries.map((series) => <span key={series.providerId} style={{ "--series-color": series.color } as React.CSSProperties}>{series.label}</span>)}
-          </div>
-        )}
+        <div className="chart-legend">
+          {providerSeries.map((series) => (
+            <button
+              className={hiddenProviders.has(series.providerId) ? "is-hidden" : ""}
+              key={series.providerId}
+              onClick={() => setHiddenProviders((current) => {
+                const next = new Set(current);
+                if (next.has(series.providerId)) {
+                  next.delete(series.providerId);
+                } else {
+                  next.add(series.providerId);
+                }
+                return next;
+              })}
+              style={{ "--series-color": series.color } as React.CSSProperties}
+              type="button"
+            >
+              {series.label}
+            </button>
+          ))}
+        </div>
         <div className="charts">
           <Chart title="Usage %" data={chartData}>
             <LineChart data={chartData}>
@@ -248,7 +236,7 @@ export default function App() {
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" domain={[0, 100]} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
-              {providerSeries.map((series) => (
+              {visibleProviderSeries.map((series) => (
                 <Line
                   key={series.usageKey}
                   name={`${series.label} session`}
@@ -259,7 +247,7 @@ export default function App() {
                   connectNulls
                 />
               ))}
-              {providerSeries.map((series) => (
+              {visibleProviderSeries.map((series) => (
                 <Line
                   key={series.weeklyKey}
                   name={`${series.label} weekly`}
@@ -279,7 +267,7 @@ export default function App() {
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" />
               <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
-              {providerSeries.map((series) => (
+              {visibleProviderSeries.map((series) => (
                 <Line
                   key={series.tokenKey}
                   name={`${series.label} tokens`}
@@ -295,29 +283,27 @@ export default function App() {
         </div>
       </section>
 
-      <section className="grid two">
-        <TotalsCard title="Session" totals={session} />
-        <TotalsCard title="Week" totals={week} />
-      </section>
-
-      <section className="panel">
-        <h2>Session Timeline</h2>
-        <table>
-          <thead>
-            <tr><th>Timestamp</th><th>Estimated tokens</th><th>Input / Output</th><th>Usage increase</th></tr>
-          </thead>
-          <tbody>
-            {state.spikes.length === 0 && <tr><td colSpan={4}>No large local spikes detected yet.</td></tr>}
-            {state.spikes.map((spike) => (
-              <tr key={`${spike.timestamp_utc}-${spike.token_increase}`}>
-                <td>{new Date(spike.timestamp_utc).toLocaleString()}</td>
-                <td>{fmt(spike.token_increase)}</td>
-                <td>{fmt(spike.input_increase)} / {fmt(spike.output_increase)}</td>
-                <td>{pct(spike.pct_increase)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <section className="provider-usage-stack">
+        {state.provider_usages.length === 0 ? (
+          <section className="panel">No provider usage data found yet.</section>
+        ) : (
+          state.provider_usages.map((usage) => (
+            <ProviderUsagePanel
+              collapsed={collapsedProviders.has(usage.provider_id)}
+              key={usage.provider_id}
+              onToggle={() => setCollapsedProviders((current) => {
+                const next = new Set(current);
+                if (next.has(usage.provider_id)) {
+                  next.delete(usage.provider_id);
+                } else {
+                  next.add(usage.provider_id);
+                }
+                return next;
+              })}
+              usage={usage}
+            />
+          ))
+        )}
       </section>
 
       <section className="grid two">
@@ -329,7 +315,6 @@ export default function App() {
 }
 
 function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void }) {
-  const snapshot = state.latest_snapshot;
   const mode = state.settings.widget_display_mode;
   return (
     <main className={`widget ${mode}`} onDoubleClick={onOpen}>
@@ -338,15 +323,28 @@ function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void
         <strong>AI Usage</strong>
       </div>
       {mode === "minimal" ? (
-        <p>{limitValue(snapshot?.session_usage_percent)} session | {limitValue(snapshot?.weekly_usage_percent)} week</p>
+        <p>{state.provider_usages.map((usage) => `${usage.display_label}: ${limitValue(usage.snapshot.session_usage_percent)}`).join(" | ") || "No data"}</p>
       ) : (
         <>
-          <WidgetRow label="Session" value={limitValue(snapshot?.session_usage_percent)} reset={snapshot?.session_usage_percent == null ? "no limit data" : snapshot?.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot?.session_reset_at)} />
-          <WidgetRow label="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} reset={snapshot?.weekly_usage_percent == null ? "no limit data" : snapshot?.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot?.weekly_reset_at)} />
+          {state.provider_usages.map((usage) => (
+            <WidgetProviderRows key={usage.provider_id} usage={usage} />
+          ))}
+          {state.provider_usages.length === 0 && <small>No provider data.</small>}
           {mode === "full" && <small>{state.status_message}</small>}
         </>
       )}
     </main>
+  );
+}
+
+function WidgetProviderRows({ usage }: { usage: ProviderUsage }) {
+  const snapshot = usage.snapshot;
+  return (
+    <div className="widget-provider">
+      <strong>{usage.display_label}</strong>
+      <WidgetRow label="Session" value={limitValue(snapshot.session_usage_percent)} reset={snapshot.session_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot.session_reset_at)} />
+      <WidgetRow label="Weekly" value={limitValue(snapshot.weekly_usage_percent)} reset={snapshot.weekly_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot.weekly_reset_at)} />
+    </div>
   );
 }
 
@@ -365,6 +363,85 @@ function TotalsCard({ title, totals }: { title: string; totals: UsageTotals }) {
       <p className="big">{fmt(totals.visible_tokens)} visible tokens</p>
       <p>{fmt(totals.input_tokens)} input | {fmt(totals.output_tokens)} output</p>
       <p>{fmt(totals.cache_read_tokens + totals.cache_write_tokens)} cache | {fmt(totals.requests)} requests</p>
+    </section>
+  );
+}
+
+function ProviderUsagePanel({ collapsed, onToggle, usage }: { collapsed: boolean; onToggle: () => void; usage: ProviderUsage }) {
+  const snapshot = usage.snapshot;
+  const session = usage.totals.session || emptyTotals;
+  const week = usage.totals.week || emptyTotals;
+  return (
+    <section className="panel provider-usage">
+      <div className="provider-title">
+        <div>
+          <h2>{usage.display_label}</h2>
+          <p className="muted">
+            {snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"} | Source: {snapshot.source}
+            {snapshot.model_name ? ` | Model: ${snapshot.model_name}` : ""}
+          </p>
+        </div>
+        <button className="section-toggle" onClick={onToggle} type="button">{collapsed ? "Show" : "Hide"}</button>
+        {snapshot.error_state && <span className="error">{snapshot.error_state}</span>}
+      </div>
+      {!collapsed && (
+        <>
+      {snapshot.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
+      <div className="grid two">
+        <MetricCard title="Session" value={limitValue(snapshot.session_usage_percent)} sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)} />
+        <MetricCard title="Weekly" value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
+      </div>
+      <div className="grid two">
+        <div>
+          <strong>Session forecast</strong>
+          <p>{duration(usage.burn.session.minutes_until_limit, usage.burn.session.reason)}</p>
+          <small>{fmt(usage.burn.session.rate_per_hour)} tokens/hr | {pct(usage.burn.session.pct_per_hour)}/hr</small>
+        </div>
+        <div>
+          <strong>Weekly forecast</strong>
+          <p>{duration(usage.burn.week.minutes_until_limit, usage.burn.week.reason)}</p>
+          <small>{fmt(usage.burn.week.rate_per_hour)} tokens/hr | {pct(usage.burn.week.pct_per_hour)}/hr</small>
+        </div>
+      </div>
+      <div className="grid two">
+        <TotalsCard title={`${usage.display_label} Session`} totals={session} />
+        <TotalsCard title={`${usage.display_label} Week`} totals={week} />
+      </div>
+      <ProviderTimeline usage={usage} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function ProviderTimeline({ usage }: { usage: ProviderUsage }) {
+  const [collapsed, setCollapsed] = useState(true);
+  return (
+    <section className="timeline">
+      <div className="timeline-head">
+        <h3>{usage.display_label} Session Timeline</h3>
+        <button className="section-toggle" onClick={() => setCollapsed((value) => !value)} type="button">
+          {collapsed ? "Show table" : "Hide table"}
+        </button>
+      </div>
+      {!collapsed && (
+        <table>
+          <thead>
+            <tr><th>Timestamp</th><th>Estimated tokens</th><th>Input / Output</th><th>Usage increase</th></tr>
+          </thead>
+          <tbody>
+            {usage.spikes.length === 0 && <tr><td colSpan={4}>No large local spikes detected yet.</td></tr>}
+            {usage.spikes.map((spike) => (
+              <tr key={`${usage.provider_id}-${spike.timestamp_utc}-${spike.token_increase}`}>
+                <td>{new Date(spike.timestamp_utc).toLocaleString()}</td>
+                <td>{fmt(spike.token_increase)}</td>
+                <td>{fmt(spike.input_increase)} / {fmt(spike.output_increase)}</td>
+                <td>{pct(spike.pct_increase)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }

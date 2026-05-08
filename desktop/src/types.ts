@@ -92,10 +92,23 @@ export interface ChartPoint {
   output_tokens: number;
 }
 
+export interface ProviderUsage {
+  provider_id: string;
+  display_label: string;
+  snapshot: UsageSnapshot;
+  totals: Record<string, UsageTotals>;
+  burn: {
+    session: BurnRateProjection;
+    week: BurnRateProjection;
+  };
+  spikes: UsageSpike[];
+}
+
 export interface MonitorState {
   settings: AppSettings;
   active_provider_id: string | null;
   providers: ProviderAvailability[];
+  provider_usages: ProviderUsage[];
   latest_snapshot: UsageSnapshot | null;
   totals: Record<string, UsageTotals>;
   burn: {

@@ -167,10 +167,21 @@ pub struct ChartPoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    pub provider_id: String,
+    pub display_label: String,
+    pub snapshot: UsageSnapshot,
+    pub totals: BTreeMap<String, UsageTotals>,
+    pub burn: BTreeMap<String, BurnRateProjection>,
+    pub spikes: Vec<UsageSpike>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorState {
     pub settings: AppSettings,
     pub active_provider_id: Option<String>,
     pub providers: Vec<ProviderAvailability>,
+    pub provider_usages: Vec<ProviderUsage>,
     pub latest_snapshot: Option<UsageSnapshot>,
     pub totals: BTreeMap<String, UsageTotals>,
     pub burn: BTreeMap<String, BurnRateProjection>,

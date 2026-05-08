@@ -9,8 +9,8 @@ mod storage;
 use crate::config::{default_app_data_dir, sanitize_settings};
 use crate::forecast::{calculate_burn, detect_spikes};
 use crate::import_legacy::import_legacy_if_needed;
-use crate::models::{AppSettings, BurnRateProjection, MonitorState};
-use crate::providers::{collect_active_provider, collect_provider, provider_availability};
+use crate::models::{AppSettings, BurnRateProjection, MonitorState, ProviderUsage};
+use crate::providers::{collect_provider, provider_availability};
 use crate::storage::Store;
 use std::collections::BTreeMap;
 use std::fs;
@@ -53,83 +53,91 @@ impl AppCore {
     fn monitor_state(&self, force_refresh: bool) -> Result<MonitorState, String> {
         let settings = self.settings()?;
         let providers = provider_availability(&settings, &self.data_dir);
-        let active = collect_active_provider(&settings, &self.data_dir);
         let mut app_state = "paused".to_string();
         let mut status_message = "Paused: no provider usage data found yet.".to_string();
-        let mut latest_snapshot = None;
-        let mut totals = crate::models::empty_totals_map();
 
-        if let Some(result) = active {
-            app_state = if result.snapshot.error_state.is_some() { "error" } else { "ready" }.to_string();
-            status_message = if result.snapshot.error_state.is_some() {
-                result.snapshot.error_state.clone().unwrap_or_else(|| "Provider unavailable.".to_string())
-            } else if result.snapshot.session_usage_percent.is_none() && result.snapshot.weekly_usage_percent.is_none() {
-                "Ready: local token counters refreshed; no exact limit percentage available.".to_string()
-            } else if result.snapshot.is_estimate {
-                "Ready: local estimate refreshed.".to_string()
-            } else {
-                "Ready: statusline usage refreshed.".to_string()
+        let mut provider_usages = Vec::new();
+        for provider in providers.iter().filter(|p| p.has_data) {
+            let Some(result) = collect_provider(&provider.provider_id, &settings, &self.data_dir) else {
+                continue;
             };
-            totals = result.totals;
+            let mut provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
             if force_refresh {
-                self.store.append_snapshot(&result.snapshot)?;
-            }
-            latest_snapshot = Some(result.snapshot);
-        }
-
-        let active_provider_id = latest_snapshot.as_ref().map(|s| s.provider_id.clone());
-        if force_refresh {
-            for provider in providers.iter().filter(|p| p.has_data) {
-                if Some(provider.provider_id.as_str()) == active_provider_id.as_deref() {
-                    continue;
-                }
-                if let Some(result) = collect_provider(&provider.provider_id, &settings, &self.data_dir) {
-                    if result.snapshot.error_state.is_none()
-                        && (result.snapshot.total_tokens > 0
-                            || result.snapshot.session_usage_percent.is_some()
-                            || result.snapshot.weekly_usage_percent.is_some())
-                    {
-                        self.store.append_snapshot(&result.snapshot)?;
-                    }
+                if result.snapshot.error_state.is_none()
+                    && (result.snapshot.total_tokens > 0
+                        || result.snapshot.session_usage_percent.is_some()
+                        || result.snapshot.weekly_usage_percent.is_some())
+                {
+                    self.store.append_snapshot(&result.snapshot)?;
+                    provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
                 }
             }
-        }
-
-        let mut history = self.store.history_points(5, None)?;
-        let mut active_history = self.store.history_points(5, active_provider_id.as_deref())?;
-        if active_history.is_empty() {
-            if let Some(snapshot) = latest_snapshot.as_ref() {
+            if provider_history.is_empty() {
+                let snapshot = &result.snapshot;
                 if snapshot.error_state.is_none()
                     && (snapshot.total_tokens > 0 || snapshot.session_usage_percent.is_some() || snapshot.weekly_usage_percent.is_some())
                 {
                     self.store.append_snapshot(snapshot)?;
-                    history = self.store.history_points(5, None)?;
-                    active_history = self.store.history_points(5, active_provider_id.as_deref())?;
+                    provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
                 }
             }
+
+            let mut burn = BTreeMap::new();
+            burn.insert(
+                "session".to_string(),
+                calculate_burn(&provider_history, "session", result.snapshot.session_usage_percent),
+            );
+            burn.insert(
+                "week".to_string(),
+                calculate_burn(&provider_history, "weekly", result.snapshot.weekly_usage_percent),
+            );
+            provider_usages.push(ProviderUsage {
+                provider_id: provider.provider_id.clone(),
+                display_label: provider.display_label.clone(),
+                spikes: detect_spikes(&provider_history),
+                burn,
+                snapshot: result.snapshot,
+                totals: result.totals,
+            });
         }
+
+        let history = self.store.history_points(5, None)?;
+        let latest_snapshot = provider_usages.first().map(|usage| usage.snapshot.clone());
+        let totals = provider_usages
+            .first()
+            .map(|usage| usage.totals.clone())
+            .unwrap_or_else(crate::models::empty_totals_map);
         let mut burn = BTreeMap::new();
-        burn.insert(
-            "session".to_string(),
-            calculate_burn(&active_history, "session", latest_snapshot.as_ref().and_then(|s| s.session_usage_percent)),
-        );
-        burn.insert(
-            "week".to_string(),
-            calculate_burn(&active_history, "weekly", latest_snapshot.as_ref().and_then(|s| s.weekly_usage_percent)),
-        );
-        if burn.is_empty() {
-            burn.insert("session".to_string(), BurnRateProjection::reason("not enough data yet"));
-            burn.insert("week".to_string(), BurnRateProjection::reason("not enough data yet"));
+        burn.insert("session".to_string(), BurnRateProjection::reason("see provider cards"));
+        burn.insert("week".to_string(), BurnRateProjection::reason("see provider cards"));
+        let spikes = provider_usages
+            .first()
+            .map(|usage| usage.spikes.clone())
+            .unwrap_or_default();
+
+        if !provider_usages.is_empty() {
+            app_state = if provider_usages.iter().any(|usage| usage.snapshot.error_state.is_some()) {
+                "error".to_string()
+            } else {
+                "ready".to_string()
+            };
+            let estimate_count = provider_usages.iter().filter(|usage| usage.snapshot.is_estimate).count();
+            status_message = if estimate_count > 0 {
+                format!("Ready: {} provider(s) refreshed; local fallback estimates are labelled.", provider_usages.len())
+            } else {
+                format!("Ready: {} provider(s) refreshed.", provider_usages.len())
+            };
         }
 
         Ok(MonitorState {
             settings,
-            active_provider_id,
+            active_provider_id: None,
             providers,
+            provider_usages,
             latest_snapshot,
             totals,
             burn,
-            spikes: detect_spikes(&active_history),
+            spikes,
             history,
             app_state,
             status_message,
