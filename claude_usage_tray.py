@@ -45,8 +45,8 @@ THEMES = {
         "strong_text": "#ffffff",
         "muted": "#b8b8b8",
         "subtle": "#d6d6d6",
-        "border": "#3a3d42",
-        "grid": "#34373d",
+        "border": "#2a2d34",
+        "grid": "#2c3038",
         "accent": "#ac84ff",
         "accent_bg": "#2b2438",
         "glow": "#5f3aa2",
@@ -761,7 +761,7 @@ def make_icon(angle: int = 0, session_pct: float = 0.0):
 
 class App:
     def __init__(self):
-        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("760x860")
+        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("900x980"); self.root.minsize(860, 760)
         self.colors = THEMES[resolved_theme_name(self.config.get("theme_mode"))]
         self._configure_ttk_theme()
         self.providers = available_provider_adapters(self.config)
@@ -770,7 +770,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading usage data...")
         self.state_label = tk.StringVar(value="Loading")
-        self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
+        self.panel_window = None; self.widget_window = None; self.provider_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
         self.last_burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
         self.last_graph_rows: List[Dict[str, Any]] = []
         self.last_spikes: List[UsageSpike] = []
@@ -795,7 +795,7 @@ class App:
         style.configure(".", background=c["bg"], foreground=c["text"], fieldbackground=c["surface"])
         style.configure("TFrame", background=c["bg"])
         style.configure("TLabel", background=c["bg"], foreground=c["text"])
-        style.configure("TLabelframe", background=c["bg"], foreground=c["text"], bordercolor=c["border"])
+        style.configure("TLabelframe", background=c["bg"], foreground=c["text"], bordercolor=c["border"], lightcolor=c["border"], darkcolor=c["border"], borderwidth=1, relief="solid")
         style.configure("TLabelframe.Label", background=c["bg"], foreground=c["text"])
         style.configure("TButton", background=c["button_bg"], foreground=c["text"], bordercolor=c["border"])
         style.map("TButton", background=[("active", c["button_active"])], foreground=[("disabled", c["muted"])])
@@ -852,12 +852,13 @@ class App:
             self.labels[k] = tk.StringVar(value="Scanning...")
             ttk.Label(self.local_totals_frame, text=k.title(), font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(8,0))
             ttk.Label(self.local_totals_frame, textvariable=self.labels[k]).pack(anchor="w", padx=10)
-        ttk.Label(self.root, textvariable=self.status).pack(anchor="w", padx=12, pady=4)
+        self.status_label = ttk.Label(self.root, textvariable=self.status); self.status_label.pack(anchor="w", padx=12, pady=4)
         btn = ttk.Frame(self.root); btn.pack(fill="x", padx=12, pady=10)
         ttk.Button(btn, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(btn, text="Settings", command=self.settings).pack(side="left", padx=6)
         ttk.Button(btn, text="Show Widget", command=self.show_desktop_widget).pack(side="left")
-        ttk.Button(btn, text="Open Provider Usage Page", command=lambda:webbrowser.open("https://claude.ai/settings/usage")).pack(side="left", padx=6)
+        ttk.Button(btn, text="Providers", command=self.show_providers).pack(side="left", padx=6)
+        ttk.Button(btn, text="Open Usage Page", command=self.open_provider_usage_page).pack(side="left", padx=6)
         ttk.Button(btn, text="Open Debug Log", command=lambda: os.startfile(str(DEBUG_LOG)) if DEBUG_LOG.exists() else messagebox.showinfo("Debug log", str(DEBUG_LOG))).pack(side="left", padx=6)
     def _set_provider_sections_visible(self, visible: bool):
         frames = [self.api_frame, self.graph_frame, self.timeline_frame, self.local_totals_frame]
@@ -866,13 +867,46 @@ class App:
                 self.no_provider_label.pack_forget()
             for frame in frames:
                 if not frame.winfo_ismapped():
-                    frame.pack(fill="x" if frame is not self.local_totals_frame else "both", expand=(frame is self.local_totals_frame), padx=12, pady=4)
+                    frame.pack(fill="x" if frame is not self.local_totals_frame else "both", expand=(frame is self.local_totals_frame), padx=12, pady=4, before=self.status_label)
         else:
             for frame in frames:
                 if frame.winfo_ismapped():
                     frame.pack_forget()
             if not self.no_provider_label.winfo_ismapped():
-                self.no_provider_label.pack(anchor="w", padx=12, pady=10)
+                self.no_provider_label.pack(anchor="w", padx=12, pady=10, before=self.status_label)
+    def open_provider_usage_page(self):
+        if self.provider and self.provider.provider_id == CodexCliProviderAdapter.provider_id:
+            webbrowser.open("https://chatgpt.com/codex/settings/usage")
+        else:
+            webbrowser.open("https://claude.ai/settings/usage")
+    def show_providers(self):
+        if self.provider_window and self.provider_window.winfo_exists():
+            self.provider_window.deiconify(); self.provider_window.lift(); return
+        w = tk.Toplevel(self.root); self.provider_window = w; w.title("Providers"); w.geometry("620x360"); w.minsize(560, 320); w.configure(bg=self.colors["bg"], padx=12, pady=12)
+        ttk.Label(w, text="Providers", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(w, text="Only providers with local usage data appear in the main monitor. Installed tools without a safe usage source stay hidden.", wraplength=570).pack(anchor="w", pady=(2,10))
+        for provider in self.providers.values():
+            availability = provider.check_availability()
+            status = "Shown in monitor" if provider.provider_id in self.visible_providers else "Hidden until usage data is available"
+            if provider.availability_only:
+                status = "Installed, but usage tracking needs opt-in instrumentation"
+            row = ttk.LabelFrame(w, text=provider.display_label)
+            row.pack(fill="x", pady=5)
+            ttk.Label(row, text=f"{status}\n{availability.message or availability.source}", justify="left", wraplength=540).pack(anchor="w", padx=10, pady=8)
+            actions = ttk.Frame(row); actions.pack(fill="x", padx=10, pady=(0,8))
+            if provider.provider_id == ClaudeCodeProviderAdapter.provider_id:
+                ttk.Button(actions, text="Open Claude Usage", command=lambda: webbrowser.open("https://claude.ai/settings/usage")).pack(side="left")
+            elif provider.provider_id == CodexCliProviderAdapter.provider_id:
+                ttk.Button(actions, text="Open Codex Usage", command=lambda: webbrowser.open("https://chatgpt.com/codex/settings/usage")).pack(side="left")
+                ttk.Button(actions, text="Enable Tracking", command=self.explain_codex_tracking).pack(side="left", padx=6)
+        w.protocol("WM_DELETE_WINDOW", lambda: (w.destroy(), setattr(self, "provider_window", None)))
+    def explain_codex_tracking(self):
+        messagebox.showinfo(
+            "OpenAI Codex CLI tracking",
+            "Codex CLI is detected, but this app does not yet have a safe exact usage source for it.\n\n"
+            "The next supported path is opt-in instrumentation around `codex exec --json` or an explicit OpenAI Usage API integration. "
+            "This app will not read Codex auth, transcripts, history, logs, or SQLite rows by default.",
+        )
     def _start_tray(self):
         if pystray is None:
             log("pystray/Pillow unavailable; no tray icon")
