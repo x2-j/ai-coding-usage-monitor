@@ -89,6 +89,14 @@ class RateLimitUsage:
     def from_record(cls, record: UsageRecord) -> "RateLimitUsage":
         return cls(record.session_usage_pct, record.session_reset_time, record.weekly_usage_pct, record.weekly_reset_time, record.source, record.error)
 
+@dataclass
+class BurnRateProjection:
+    rate_per_minute: Optional[float] = None
+    rate_per_hour: Optional[float] = None
+    pct_per_hour: Optional[float] = None
+    time_until_limit: Optional[timedelta] = None
+    reason: Optional[str] = None
+
 def log(msg: str) -> None:
     try:
         with DEBUG_LOG.open("a", encoding="utf-8") as f:
@@ -295,6 +303,128 @@ def query_usage_last_5_hours() -> List[Dict[str, Any]]: return query_usage_histo
 def query_usage_last_24_hours() -> List[Dict[str, Any]]: return query_usage_history(24)
 def query_usage_last_7_days() -> List[Dict[str, Any]]: return query_usage_history(24 * 7)
 
+def history_token_total(row: Dict[str, Any], scope: str = "session", include_cache: bool = False) -> Optional[int]:
+    totals = row.get("totals")
+    if isinstance(totals, dict) and isinstance(totals.get(scope), dict):
+        t = totals[scope]
+        visible = to_int(t.get("input_tokens")) + to_int(t.get("output_tokens"))
+        if include_cache:
+            return visible + to_int(t.get("cache_creation_input_tokens")) + to_int(t.get("cache_read_input_tokens"))
+        return visible
+    if scope == "session":
+        visible = to_int(row.get("input_tokens")) + to_int(row.get("output_tokens"))
+        if include_cache:
+            return visible + to_int(row.get("cache_creation_input_tokens")) + to_int(row.get("cache_read_input_tokens"))
+        return visible
+    return None
+
+def history_points(rows: List[Dict[str, Any]], value_fn) -> List[Tuple[datetime, float]]:
+    points: List[Tuple[datetime, float]] = []
+    for row in rows:
+        ts = parse_reset(row.get("timestamp"))
+        if not ts: continue
+        value = value_fn(row)
+        if value is None: continue
+        try: points.append((ts, float(value)))
+        except Exception: continue
+    points.sort(key=lambda p: p[0])
+    deduped: List[Tuple[datetime, float]] = []
+    for ts, value in points:
+        if deduped and ts == deduped[-1][0]: deduped[-1] = (ts, value)
+        else: deduped.append((ts, value))
+    return deduped
+
+def latest_monotonic_segment(points: List[Tuple[datetime, float]]) -> List[Tuple[datetime, float]]:
+    if len(points) < 2: return points
+    segment = [points[-1]]
+    previous = points[-1][1]
+    for ts, value in reversed(points[:-1]):
+        if value > previous:
+            break
+        segment.append((ts, value))
+        previous = value
+    segment.reverse()
+    return segment
+
+def value_velocity_per_hour(rows: List[Dict[str, Any]], value_fn) -> Optional[float]:
+    segment = latest_monotonic_segment(history_points(rows, value_fn))
+    if len(segment) < 2: return None
+    start_ts, start_value = segment[0]
+    end_ts, end_value = segment[-1]
+    elapsed_hours = (end_ts - start_ts).total_seconds() / 3600
+    if elapsed_hours <= 0: return None
+    return max(0.0, end_value - start_value) / elapsed_hours
+
+def token_velocity_per_hour(rows: List[Dict[str, Any]], scope: str = "session", include_cache: bool = False) -> Optional[float]:
+    return value_velocity_per_hour(rows, lambda row: history_token_total(row, scope, include_cache))
+
+def token_velocity_per_minute(rows: List[Dict[str, Any]], scope: str = "session", include_cache: bool = False) -> Optional[float]:
+    hourly = token_velocity_per_hour(rows, scope, include_cache)
+    return None if hourly is None else hourly / 60
+
+def usage_percentage_change_per_hour(rows: List[Dict[str, Any]], pct_key: str = "session_usage_pct") -> Optional[float]:
+    return value_velocity_per_hour(rows, lambda row: normalize_pct(row.get(pct_key)))
+
+def latest_history_pct(rows: List[Dict[str, Any]], pct_key: str) -> Optional[float]:
+    points = history_points(rows, lambda row: normalize_pct(row.get(pct_key)))
+    return points[-1][1] if points else None
+
+def projected_time_until_limit(current_pct: Optional[float], pct_per_hour: Optional[float], reset_time: Any = None) -> Tuple[Optional[timedelta], Optional[str]]:
+    if current_pct is None:
+        return None, "missing usage percentage"
+    if pct_per_hour is None:
+        return None, "not enough data"
+    if pct_per_hour <= 0:
+        return None, "zero activity"
+    remaining_pct = max(0.0, 100.0 - current_pct)
+    if remaining_pct <= 0:
+        return timedelta(0), None
+    projected = timedelta(hours=remaining_pct / pct_per_hour)
+    reset = parse_reset(reset_time)
+    if reset:
+        until_reset = reset - datetime.now().astimezone()
+        if until_reset.total_seconds() >= 0 and projected > until_reset:
+            return None, "resets before projected limit"
+    return projected, None
+
+def projected_time_until_session_limit(rows: List[Dict[str, Any]], current_pct: Optional[float] = None, reset_time: Any = None) -> Tuple[Optional[timedelta], Optional[str]]:
+    if current_pct is None:
+        current_pct = latest_history_pct(rows, "session_usage_pct")
+    return projected_time_until_limit(current_pct, usage_percentage_change_per_hour(rows, "session_usage_pct"), reset_time)
+
+def projected_time_until_weekly_limit(rows: List[Dict[str, Any]], current_pct: Optional[float] = None, reset_time: Any = None) -> Tuple[Optional[timedelta], Optional[str]]:
+    if current_pct is None:
+        current_pct = latest_history_pct(rows, "weekly_usage_pct")
+    return projected_time_until_limit(current_pct, usage_percentage_change_per_hour(rows, "weekly_usage_pct"), reset_time)
+
+def calculate_burn_rate(rows: List[Dict[str, Any]], scope: str, pct_key: str, current_pct: Optional[float], reset_time: Any, include_cache: bool = False) -> BurnRateProjection:
+    per_hour = token_velocity_per_hour(rows, scope, include_cache)
+    pct_hour = usage_percentage_change_per_hour(rows, pct_key)
+    if current_pct is None:
+        current_pct = latest_history_pct(rows, pct_key)
+    until_limit, reason = projected_time_until_limit(current_pct, pct_hour, reset_time)
+    return BurnRateProjection(
+        rate_per_minute=None if per_hour is None else per_hour / 60,
+        rate_per_hour=per_hour,
+        pct_per_hour=pct_hour,
+        time_until_limit=until_limit,
+        reason=reason,
+    )
+
+def fmt_rate(v: Optional[float], suffix: str) -> str:
+    if v is None: return "n/a"
+    if abs(v) >= 100: return f"{v:,.0f}{suffix}"
+    return f"{v:,.1f}{suffix}"
+
+def fmt_duration(v: Optional[timedelta], reason: Optional[str] = None) -> str:
+    if v is None: return reason or "n/a"
+    seconds = max(0, int(v.total_seconds()))
+    h, r = divmod(seconds, 3600); m = r // 60
+    if h >= 24:
+        d, h = divmod(h, 24)
+        return f"{d}d {h}h"
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
 def usage_record_error(message: str, source: str = "Claude Code statusline") -> UsageRecord:
     return UsageRecord(provider_name="Anthropic", timestamp=datetime.now().astimezone(), source=source, error=message)
 
@@ -360,6 +490,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading...")
         self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
+        self.last_burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
         self._refreshing = False; self.icon = None; self.spin_angle = 0
         self._build_ui(); self._start_tray(); self.refresh(); self.root.after(500, self._poll); self.root.after(int(self.config.get("refresh_seconds",10))*1000, self._scheduled)
         if self.config.get("show_desktop_widget", True): self.show_desktop_widget()
@@ -419,17 +550,25 @@ class App:
             record = read_statusline_record()
             totals = scan_usage(self.config)
             append_usage_snapshot(record, totals, self.config)
-            self.q.put((RateLimitUsage.from_record(record), totals))
+            rate = RateLimitUsage.from_record(record)
+            history = query_usage_last_7_days()
+            burn = self._calculate_burn(rate, history)
+            self.q.put((rate, totals, burn))
         except Exception as e:
             log(f"refresh failed: {e!r}")
             totals = {k: UsageTotals() for k in ["session","today","week","all"]}
             record = usage_record_error(str(e))
             append_usage_snapshot(record, totals, self.config)
-            self.q.put((RateLimitUsage.from_record(record), totals))
+            self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="not enough data"), "week": BurnRateProjection(reason="not enough data")}))
     def _poll(self):
         try:
             while True:
-                r,t = self.q.get_nowait(); self._refreshing=False; self._update(r,t)
+                item = self.q.get_nowait(); self._refreshing=False
+                if len(item) == 2:
+                    r,t = item; burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
+                else:
+                    r,t,burn = item
+                self._update(r,t,burn)
         except queue.Empty: pass
         self.root.after(500, self._poll)
     def _scheduled(self):
@@ -439,13 +578,27 @@ class App:
         sp = r.session_pct if r.session_pct is not None else pct(self._tokens_for_pct(self.last_totals["session"]), int(self.config.get("session_budget_tokens",0)))
         wp = r.weekly_pct if r.weekly_pct is not None else pct(self._tokens_for_pct(self.last_totals["week"]), int(self.config.get("weekly_budget_tokens",0)))
         return max(0,min(100,float(sp))), max(0,min(100,float(wp))), countdown(r.session_reset), countdown(r.weekly_reset), r.source if not r.error else "local estimate"
-    def _update(self, r, totals):
-        self.last_rate, self.last_totals = r, totals
+    def _calculate_burn(self, rate: RateLimitUsage, history: List[Dict[str, Any]]) -> Dict[str, BurnRateProjection]:
+        include_cache = bool(self.config.get("include_cache_tokens"))
+        return {
+            "session": calculate_burn_rate(history, "session", "session_usage_pct", rate.session_pct, rate.session_reset, include_cache),
+            "week": calculate_burn_rate(history, "week", "weekly_usage_pct", rate.weekly_pct, rate.weekly_reset, include_cache),
+        }
+    def _burn_summary(self) -> str:
+        s = self.last_burn.get("session", BurnRateProjection())
+        w = self.last_burn.get("week", BurnRateProjection())
+        return (
+            f"Burn: {fmt_rate(s.rate_per_minute, '/min')} ({fmt_rate(s.rate_per_hour, '/hr')}) | "
+            f"session limit in {fmt_duration(s.time_until_limit, s.reason)}\n"
+            f"Weekly pace: {fmt_rate(w.pct_per_hour, '%/hr')} | weekly limit in {fmt_duration(w.time_until_limit, w.reason)}"
+        )
+    def _update(self, r, totals, burn):
+        self.last_rate, self.last_totals, self.last_burn = r, totals, burn
         sp, wp, sr, wr, src = self._effective()
         if r.error:
-            self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%")
+            self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._burn_summary()}")
         else:
-            self.rate_label.set(f"Session / 5-hour limit: {sp:.1f}% used — resets in {sr}\nWeekly / 7-day limit: {wp:.1f}% used — resets in {wr}\nSource: {src}")
+            self.rate_label.set(f"Session / 5-hour limit: {sp:.1f}% used - resets in {sr}\nWeekly / 7-day limit: {wp:.1f}% used - resets in {wr}\n{self._burn_summary()}\nSource: {src}")
         for k,t in totals.items():
             self.labels[k].set(f"In: {fmt(t.input_tokens)} | Out: {fmt(t.output_tokens)} | Cache: {fmt(t.cache_creation_input_tokens+t.cache_read_input_tokens)} | Requests: {fmt(t.requests)}")
         self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Statusline file: {STATUSLINE_LATEST}")

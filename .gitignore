@@ -1,0 +1,348 @@
+# =========================================================
+# Claude Usage Monitor - Comprehensive .gitignore
+# =========================================================
+
+# ---------------------------------------------------------
+# OS / File Explorer Noise
+# ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ---------------------------------------------------------
+# Python
+# ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+pythonenv/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+site/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------
+# Node / Frontend / Electron / Tauri
+# ---------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Frontend build artifacts
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+vite.svg
+*.tsbuildinfo
+
+# Electron/Tauri artifacts
+src-tauri/target/
+src-tauri/gen/
+release/
+debug/
+out/
+
+# ---------------------------------------------------------
+# Rust
+# ---------------------------------------------------------
+target/
+Cargo.lock
+
+# Keep Cargo.lock for applications if desired:
+#! Cargo.lock
+
+# ---------------------------------------------------------
+# React / UI / Charting Temp Files
+# ---------------------------------------------------------
+storybook-static/
+.playwright/
+playwright-report/
+test-results/
+
+# ---------------------------------------------------------
+# Windows Native / WinUI / MSIX
+# ---------------------------------------------------------
+bin/
+obj/
+x64/
+x86/
+arm64/
+BundleArtifacts/
+AppPackages/
+Generated Files/
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
+*.cer
+*.pfx
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Rider / JetBrains
+.idea/
+
+# ---------------------------------------------------------
+# Logs / Debug / Telemetry
+# ---------------------------------------------------------
+logs/
+*.log
+debug.log
+trace.log
+telemetry.log
+usage_history.log
+
+# Runtime diagnostic dumps
+*.stackdump
+*.dmp
+
+# ---------------------------------------------------------
+# Local Usage History / State
+# ---------------------------------------------------------
+data/
+state/
+runtime/
+storage/
+history/
+snapshots/
+sessions/
+
+# SQLite / embedded DBs
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# JSONL history files
+*.jsonl
+
+# ---------------------------------------------------------
+# Sensitive Local Configuration
+# ---------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+secrets/
+private/
+credentials/
+tokens/
+
+# Local user configs
+config.local.*
+settings.local.*
+local.settings.json
+user.config.json
+
+# Runtime-generated config
+runtime_config.json
+session_state.json
+
+# ---------------------------------------------------------
+# Claude / AI Provider Credentials
+# ---------------------------------------------------------
+
+# Claude local auth
+.claude/
+**/.claude/
+
+# OpenAI auth
+.openai/
+**/.openai/
+
+# Gemini auth
+.gemini/
+**/.gemini/
+
+# Cursor local auth
+.cursor/
+**/.cursor/
+
+# API keys / credentials
+*apikey*
+*api_key*
+*secret*
+*token*
+*credential*
+
+# ---------------------------------------------------------
+# Cached Usage / Telemetry Snapshots
+# ---------------------------------------------------------
+cache/
+.cache/
+temp/
+tmp/
+
+usage_cache/
+provider_cache/
+snapshot_cache/
+forecast_cache/
+burnrate_cache/
+
+# Image/chart caches
+chart_cache/
+graph_cache/
+
+# ---------------------------------------------------------
+# Packaged Builds / Releases
+# ---------------------------------------------------------
+artifacts/
+packages/
+installer/
+installers/
+
+*.exe
+*.msi
+*.deb
+*.rpm
+*.dmg
+*.pkg
+*.AppImage
+
+# Allow checked-in release docs if desired
+!RELEASE_NOTES.md
+
+# ---------------------------------------------------------
+# Auto-update / Updater Systems
+# ---------------------------------------------------------
+updates/
+updater_cache/
+
+# ---------------------------------------------------------
+# Security / Privacy
+# ---------------------------------------------------------
+
+# Local exports containing telemetry
+exports/
+reports/
+diagnostics/
+
+# Potentially sensitive generated files
+*.csv
+*.parquet
+
+# Screen captures
+screenshots/
+recordings/
+
+# ---------------------------------------------------------
+# Testing / Experimental
+# ---------------------------------------------------------
+sandbox/
+experiments/
+prototypes/
+benchmarks/
+perf/
+
+# AI-generated scratch files
+ai_tmp/
+llm_output/
+generated/
+
+# ---------------------------------------------------------
+# IDE / Editor
+# ---------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------
+# Package Managers
+# ---------------------------------------------------------
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Keep lockfiles if desired for reproducibility:
+#! package-lock.json
+#! yarn.lock
+
+# ---------------------------------------------------------
+# Docker / Containers
+# ---------------------------------------------------------
+.docker/
+docker-cache/
+*.tar
+
+# Local compose overrides
+docker-compose.override.yml
+
+# ---------------------------------------------------------
+# Future Cross-Platform Support
+# ---------------------------------------------------------
+
+# macOS app bundles
+*.app
+
+# Linux desktop artifacts
+*.desktop
+
+# Flatpak/Snap
+.snap/
+.flatpak-builder/
+
+# ---------------------------------------------------------
+# Misc
+# ---------------------------------------------------------
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
+
+# Generated changelogs/releases
+generated_changelog.md
+
+# ---------------------------------------------------------
+# Explicitly tracked example/config templates
+# ---------------------------------------------------------
+!config.example.json
+!settings.example.json
+!example.env
