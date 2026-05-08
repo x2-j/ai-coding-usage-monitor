@@ -63,6 +63,8 @@ impl AppCore {
             app_state = if result.snapshot.error_state.is_some() { "error" } else { "ready" }.to_string();
             status_message = if result.snapshot.error_state.is_some() {
                 result.snapshot.error_state.clone().unwrap_or_else(|| "Provider unavailable.".to_string())
+            } else if result.snapshot.session_usage_percent.is_none() && result.snapshot.weekly_usage_percent.is_none() {
+                "Ready: local token counters refreshed; no exact limit percentage available.".to_string()
             } else if result.snapshot.is_estimate {
                 "Ready: local estimate refreshed.".to_string()
             } else {
@@ -75,7 +77,17 @@ impl AppCore {
             latest_snapshot = Some(result.snapshot);
         }
 
-        let history = self.store.history_points(5)?;
+        let mut history = self.store.history_points(5)?;
+        if history.is_empty() {
+            if let Some(snapshot) = latest_snapshot.as_ref() {
+                if snapshot.error_state.is_none()
+                    && (snapshot.total_tokens > 0 || snapshot.session_usage_percent.is_some() || snapshot.weekly_usage_percent.is_some())
+                {
+                    self.store.append_snapshot(snapshot)?;
+                    history = self.store.history_points(5)?;
+                }
+            }
+        }
         let mut burn = BTreeMap::new();
         burn.insert(
             "session".to_string(),

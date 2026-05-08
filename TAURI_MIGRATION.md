@@ -17,6 +17,8 @@ npm install
 npm run dev
 ```
 
+`start_tauri.bat` runs the same development command from the repo root.
+
 ## Build the Windows installer
 
 ```bat

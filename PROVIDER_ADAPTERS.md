@@ -340,6 +340,8 @@ fn usage_record_from_example_json(
 
 If a provider supplies exact percentages or reset times, set those fields and use `is_estimate: false` for that part of the snapshot.
 
+Do not convert raw token totals into provider subscription usage percentages unless the provider has a documented token budget for that exact limit window. For example, Codex CLI local token counters are useful for velocity and history, but they are not exact ChatGPT/Codex plan usage percentages.
+
 ### 6. Add UI Controls
 
 For providers that are opt-in, add a button similar to Codex in `desktop/src/App.tsx`.

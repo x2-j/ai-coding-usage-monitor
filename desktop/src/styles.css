@@ -89,6 +89,7 @@ h3 { font-size: 13px; color: var(--muted); }
   gap: 4px;
 }
 .metric span, small, .provider small { color: var(--muted); }
+.muted { color: var(--muted); }
 .metric strong {
   font-size: 32px;
 }
@@ -162,7 +163,10 @@ input, select {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: move;
+  user-select: none;
 }
+.widget-head * { pointer-events: none; }
 .logo-dot {
   width: 14px;
   height: 14px;

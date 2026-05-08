@@ -4,7 +4,7 @@
   "version": "0.7.0-migration.0",
   "identifier": "local.simple-ai-usage-monitor",
   "build": {
-    "beforeDevCommand": "npm run check",
+    "beforeDevCommand": "npm run dev:frontend",
     "beforeBuildCommand": "npm run check",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"

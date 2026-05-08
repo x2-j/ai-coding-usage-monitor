@@ -12,6 +12,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-skip-taskbar",
+    "core:window:allow-start-dragging",
     "core:app:default",
     "core:menu:default",
     "core:tray:default",

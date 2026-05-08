@@ -201,7 +201,8 @@ impl Store {
             .prepare(
                 r#"
                 SELECT timestamp_utc, session_usage_percent, weekly_usage_percent,
-                       total_tokens, input_tokens, output_tokens
+                       total_tokens, input_tokens,
+                       output_tokens
                 FROM usage_snapshots
                 WHERE timestamp_utc >= ?1
                 ORDER BY timestamp_utc ASC

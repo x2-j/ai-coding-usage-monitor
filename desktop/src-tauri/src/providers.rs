@@ -124,29 +124,37 @@ pub fn collect_claude(settings: &AppSettings, data_dir: &Path) -> ProviderResult
     } else {
         UsageSnapshot::error(CLAUDE_ID, "Anthropic", "No Claude Code statusline data yet; using local estimates.".to_string())
     };
-    apply_estimates(&mut snapshot, &totals, settings);
+    apply_token_totals(&mut snapshot, &totals, settings, true);
     ProviderResult { snapshot, totals }
 }
 
 pub fn collect_codex(settings: &AppSettings) -> ProviderResult {
     let (latest, totals) = scan_codex_logs(settings);
     let mut snapshot = latest.unwrap_or_else(|| UsageSnapshot::error(CODEX_ID, "OpenAI", "No Codex token usage records found.".to_string()));
-    apply_estimates(&mut snapshot, &totals, settings);
+    apply_token_totals(&mut snapshot, &totals, settings, false);
     ProviderResult { snapshot, totals }
 }
 
-fn apply_estimates(snapshot: &mut UsageSnapshot, totals: &BTreeMap<String, UsageTotals>, settings: &AppSettings) {
+fn apply_token_totals(
+    snapshot: &mut UsageSnapshot,
+    totals: &BTreeMap<String, UsageTotals>,
+    settings: &AppSettings,
+    estimate_percentages: bool,
+) {
     let session = totals.get("session").cloned().unwrap_or_else(UsageTotals::empty);
     let week = totals.get("week").cloned().unwrap_or_else(UsageTotals::empty);
     let session_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
     let weekly_tokens = if settings.include_cache_tokens { week.total_tokens } else { week.visible_tokens };
-    if snapshot.session_usage_percent.is_none() {
+    if estimate_percentages && snapshot.session_usage_percent.is_none() {
         snapshot.session_usage_percent = percentage(session_tokens, settings.session_budget_tokens);
         snapshot.is_estimate = true;
     }
-    if snapshot.weekly_usage_percent.is_none() {
+    if estimate_percentages && snapshot.weekly_usage_percent.is_none() {
         snapshot.weekly_usage_percent = percentage(weekly_tokens, settings.weekly_budget_tokens);
         snapshot.is_estimate = true;
+    }
+    if !estimate_percentages && snapshot.session_usage_percent.is_none() && snapshot.weekly_usage_percent.is_none() {
+        snapshot.raw_limit_name = Some("No exact local limit percentage available".to_string());
     }
     snapshot.input_tokens = session.input_tokens;
     snapshot.output_tokens = session.output_tokens;
@@ -309,7 +317,7 @@ fn usage_record_from_codex_json(value: &Value, provider_name: &str, provider_id:
     Some(UsageSnapshot {
         provider_id: provider_id.to_string(),
         provider_name: provider_name.to_string(),
-        source: "Codex CLI local sessions (opt-in)".to_string(),
+        source: "Codex CLI local token counters (no exact limit data)".to_string(),
         timestamp_utc: parse_time(find_first_value(value, &["timestamp", "created_at", "createdAt", "time", "ts"])).unwrap_or_else(|| timestamp_from_epoch(fallback)),
         model_name: find_first_string(value, &["model", "model_name", "modelName"]),
         input_tokens: input,
@@ -474,4 +482,52 @@ fn codex_version() -> Option<String> {
     let cmd = find_codex_command()?;
     let output = Command::new(cmd).arg("--version").output().ok()?;
     Some(String::from_utf8_lossy(if output.stdout.is_empty() { &output.stderr } else { &output.stdout }).lines().next().unwrap_or("unknown").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::default_settings;
+
+    #[test]
+    fn codex_token_totals_do_not_become_fake_limit_percentages() {
+        let mut settings = default_settings();
+        settings.session_budget_tokens = 1_000;
+        settings.weekly_budget_tokens = 1_000;
+        let mut totals = empty_totals_map();
+        totals.get_mut("session").unwrap().input_tokens = 25_000;
+        totals.get_mut("session").unwrap().visible_tokens = 25_000;
+        totals.get_mut("session").unwrap().total_tokens = 25_000;
+        totals.get_mut("week").unwrap().input_tokens = 50_000;
+        totals.get_mut("week").unwrap().visible_tokens = 50_000;
+        totals.get_mut("week").unwrap().total_tokens = 50_000;
+        let mut snapshot = UsageSnapshot::error(CODEX_ID, "OpenAI", "test".to_string());
+
+        apply_token_totals(&mut snapshot, &totals, &settings, false);
+
+        assert_eq!(snapshot.session_usage_percent, None);
+        assert_eq!(snapshot.weekly_usage_percent, None);
+        assert_eq!(snapshot.input_tokens, 25_000);
+        assert_eq!(snapshot.raw_limit_name.as_deref(), Some("No exact local limit percentage available"));
+    }
+
+    #[test]
+    fn claude_local_estimates_still_use_configured_budgets() {
+        let mut settings = default_settings();
+        settings.session_budget_tokens = 1_000;
+        settings.weekly_budget_tokens = 2_000;
+        let mut totals = empty_totals_map();
+        totals.get_mut("session").unwrap().input_tokens = 250;
+        totals.get_mut("session").unwrap().visible_tokens = 250;
+        totals.get_mut("session").unwrap().total_tokens = 250;
+        totals.get_mut("week").unwrap().input_tokens = 500;
+        totals.get_mut("week").unwrap().visible_tokens = 500;
+        totals.get_mut("week").unwrap().total_tokens = 500;
+        let mut snapshot = UsageSnapshot::error(CLAUDE_ID, "Anthropic", "test".to_string());
+
+        apply_token_totals(&mut snapshot, &totals, &settings, true);
+
+        assert_eq!(snapshot.session_usage_percent, Some(25.0));
+        assert_eq!(snapshot.weekly_usage_percent, Some(25.0));
+    }
 }

@@ -4,6 +4,7 @@ version = "0.7.0-migration.0"
 description = "Local-first AI coding-agent usage monitor"
 authors = ["Simple AI Usage Monitor"]
 edition = "2021"
+default-run = "simple-ai-usage-monitor"
 
 [lib]
 name = "simple_ai_usage_monitor_core"

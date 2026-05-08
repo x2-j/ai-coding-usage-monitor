@@ -73,6 +73,8 @@ From the repo root:
 start_tauri.bat
 ```
 
+`start_tauri.bat` is a convenience wrapper for `cd desktop` followed by `npm run dev`.
+
 Debug helper:
 
 ```bat
@@ -125,4 +127,5 @@ The statusline capture stores sanitized usage fields in the local app data folde
 - The floating widget is not a Windows Widgets Board widget.
 - A true Windows 11 Widget provider requires a separate Windows App SDK/MSIX widget-provider track.
 - Forecasts and local fallback percentages are estimates unless sourced from recognized statusline rate-limit data.
+- Codex CLI local tracking shows local token counters, not ChatGPT/Codex plan usage percentage.
 - Session timeline entries are based on local token deltas and do not include prompt or response content.

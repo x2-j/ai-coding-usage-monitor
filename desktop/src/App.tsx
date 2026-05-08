@@ -42,6 +42,16 @@ function pct(n: number | null | undefined) {
   return `${n.toFixed(1)}%`;
 }
 
+function limitValue(n: number | null | undefined) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "No exact data";
+  return `${n.toFixed(1)}%`;
+}
+
+function resetLabel(iso: string | null | undefined, value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "Limit source unavailable";
+  return `Reset ${countdown(iso)}`;
+}
+
 function countdown(iso: string | null | undefined) {
   if (!iso) return "unknown";
   const ms = new Date(iso).getTime() - Date.now();
@@ -67,6 +77,10 @@ function duration(minutes: number | null | undefined, reason?: string | null) {
 function timeLabel(value: string) {
   const date = new Date(value);
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function startWindowDrag() {
+  getCurrentWindow().startDragging().catch(() => undefined);
 }
 
 export default function App() {
@@ -146,20 +160,21 @@ export default function App() {
       {error && <section className="notice error">{error}</section>}
 
       <section className="grid two">
-        <MetricCard title="Session" value={pct(snapshot?.session_usage_percent)} sub={`Reset ${countdown(snapshot?.session_reset_at)}`} />
-        <MetricCard title="Weekly" value={pct(snapshot?.weekly_usage_percent)} sub={`Reset ${countdown(snapshot?.weekly_reset_at)}`} />
+        <MetricCard title="Session" value={limitValue(snapshot?.session_usage_percent)} sub={resetLabel(snapshot?.session_reset_at, snapshot?.session_usage_percent)} />
+        <MetricCard title="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} sub={resetLabel(snapshot?.weekly_reset_at, snapshot?.weekly_usage_percent)} />
       </section>
 
       <section className="panel">
         <h2>Provider Usage Limits</h2>
         <p className="big">
           {snapshot
-            ? `${snapshot.provider_name || "Provider"} ${snapshot.is_estimate ? "local estimate" : "statusline"}`
+            ? `${snapshot.provider_name || "Provider"} ${snapshot.session_usage_percent === null && snapshot.weekly_usage_percent === null ? "local token tracking" : snapshot.is_estimate ? "local estimate" : "statusline"}`
             : "No active provider"}
         </p>
         <p>
           Source: {snapshot?.source || "none"} {snapshot?.model_name ? `| Model: ${snapshot.model_name}` : ""}
         </p>
+        {snapshot?.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
         {snapshot?.error_state && <p className="error">{snapshot.error_state}</p>}
         <div className="grid two">
           <div>
@@ -184,8 +199,8 @@ export default function App() {
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" domain={[0, 100]} />
               <Tooltip />
-              <Line type="monotone" dataKey="session_usage_percent" stroke="var(--accent)" dot={false} />
-              <Line type="monotone" dataKey="weekly_usage_percent" stroke="var(--blue)" dot={false} />
+              <Line type="monotone" dataKey="session_usage_percent" stroke="var(--accent)" dot={chartData.length < 2} connectNulls />
+              <Line type="monotone" dataKey="weekly_usage_percent" stroke="var(--blue)" dot={chartData.length < 2} connectNulls />
             </LineChart>
           </Chart>
           <Chart title="Session Tokens" data={chartData}>
@@ -238,16 +253,16 @@ function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void
   const mode = state.settings.widget_display_mode;
   return (
     <main className={`widget ${mode}`} onDoubleClick={onOpen}>
-      <div className="widget-head">
+      <div className="widget-head" data-tauri-drag-region onMouseDown={startWindowDrag} title="Drag to move">
         <span className="logo-dot" />
         <strong>AI Usage</strong>
       </div>
       {mode === "minimal" ? (
-        <p>{pct(snapshot?.session_usage_percent)} session | {pct(snapshot?.weekly_usage_percent)} week</p>
+        <p>{limitValue(snapshot?.session_usage_percent)} session | {limitValue(snapshot?.weekly_usage_percent)} week</p>
       ) : (
         <>
-          <WidgetRow label="Session" value={pct(snapshot?.session_usage_percent)} reset={countdown(snapshot?.session_reset_at)} />
-          <WidgetRow label="Weekly" value={pct(snapshot?.weekly_usage_percent)} reset={countdown(snapshot?.weekly_reset_at)} />
+          <WidgetRow label="Session" value={limitValue(snapshot?.session_usage_percent)} reset={snapshot?.session_usage_percent == null ? "no limit data" : countdown(snapshot?.session_reset_at)} />
+          <WidgetRow label="Weekly" value={limitValue(snapshot?.weekly_usage_percent)} reset={snapshot?.weekly_usage_percent == null ? "no limit data" : countdown(snapshot?.weekly_reset_at)} />
           {mode === "full" && <small>{state.status_message}</small>}
         </>
       )}
