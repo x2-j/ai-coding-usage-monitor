@@ -97,6 +97,14 @@ class BurnRateProjection:
     time_until_limit: Optional[timedelta] = None
     reason: Optional[str] = None
 
+@dataclass
+class UsageSpike:
+    timestamp: datetime
+    token_increase: int
+    input_increase: Optional[int] = None
+    output_increase: Optional[int] = None
+    pct_increase: Optional[float] = None
+
 def log(msg: str) -> None:
     try:
         with DEBUG_LOG.open("a", encoding="utf-8") as f:
@@ -318,6 +326,14 @@ def history_token_total(row: Dict[str, Any], scope: str = "session", include_cac
         return visible
     return None
 
+def history_token_component(row: Dict[str, Any], component: str, scope: str = "session") -> Optional[int]:
+    totals = row.get("totals")
+    if isinstance(totals, dict) and isinstance(totals.get(scope), dict):
+        return to_int(totals[scope].get(component))
+    if scope == "session":
+        return to_int(row.get(component))
+    return None
+
 def history_points(rows: List[Dict[str, Any]], value_fn) -> List[Tuple[datetime, float]]:
     points: List[Tuple[datetime, float]] = []
     for row in rows:
@@ -345,6 +361,33 @@ def latest_monotonic_segment(points: List[Tuple[datetime, float]]) -> List[Tuple
         previous = value
     segment.reverse()
     return segment
+
+def detect_usage_spikes(rows: List[Dict[str, Any]], include_cache: bool = False, limit: int = 8) -> List[UsageSpike]:
+    token_points = history_points(rows, lambda row: history_token_total(row, "session", include_cache))
+    input_points = dict(history_points(rows, lambda row: history_token_component(row, "input_tokens", "session")))
+    output_points = dict(history_points(rows, lambda row: history_token_component(row, "output_tokens", "session")))
+    pct_points = dict(history_points(rows, lambda row: normalize_pct(row.get("session_usage_pct"))))
+    spikes: List[UsageSpike] = []
+    for (prev_ts, prev_tokens), (ts, tokens) in zip(token_points, token_points[1:]):
+        token_delta = int(round(tokens - prev_tokens))
+        if token_delta <= 0:
+            continue
+        prev_pct = pct_points.get(prev_ts)
+        pct_value = pct_points.get(ts)
+        pct_delta = None
+        if prev_pct is not None and pct_value is not None and pct_value >= prev_pct:
+            pct_delta = pct_value - prev_pct
+        if token_delta < 1000 and (pct_delta is None or pct_delta < 1.0):
+            continue
+        input_delta = None
+        output_delta = None
+        if prev_ts in input_points and ts in input_points:
+            input_delta = max(0, int(round(input_points[ts] - input_points[prev_ts])))
+        if prev_ts in output_points and ts in output_points:
+            output_delta = max(0, int(round(output_points[ts] - output_points[prev_ts])))
+        spikes.append(UsageSpike(ts, token_delta, input_delta, output_delta, pct_delta))
+    spikes.sort(key=lambda spike: spike.timestamp, reverse=True)
+    return spikes[:limit]
 
 def value_velocity_per_hour(rows: List[Dict[str, Any]], value_fn) -> Optional[float]:
     segment = latest_monotonic_segment(history_points(rows, value_fn))
@@ -495,12 +538,13 @@ def make_icon(angle: int = 0, session_pct: float = 0.0):
 
 class App:
     def __init__(self):
-        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("760x760")
+        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("760x860")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading...")
         self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
         self.last_burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
         self.last_graph_rows: List[Dict[str, Any]] = []
+        self.last_spikes: List[UsageSpike] = []
         self._refreshing = False; self.icon = None; self.spin_angle = 0
         self._build_ui(); self._start_tray(); self.refresh(); self.root.after(500, self._poll); self.root.after(int(self.config.get("refresh_seconds",10))*1000, self._scheduled)
         if self.config.get("show_desktop_widget", True): self.show_desktop_widget()
@@ -520,6 +564,19 @@ class App:
             canvas.bind("<Configure>", lambda e: self._draw_all_graphs())
             self.graph_canvases[key] = canvas
         graph_grid.columnconfigure(0, weight=1); graph_grid.columnconfigure(1, weight=1)
+        timeline = ttk.LabelFrame(self.root, text="Session Timeline")
+        timeline.pack(fill="x", padx=12, pady=4)
+        columns = ("timestamp", "tokens", "split", "pct")
+        self.timeline_tree = ttk.Treeview(timeline, columns=columns, show="headings", height=5)
+        self.timeline_tree.heading("timestamp", text="Timestamp")
+        self.timeline_tree.heading("tokens", text="Estimated tokens")
+        self.timeline_tree.heading("split", text="Input / Output")
+        self.timeline_tree.heading("pct", text="Usage increase")
+        self.timeline_tree.column("timestamp", width=155, anchor="w")
+        self.timeline_tree.column("tokens", width=135, anchor="e")
+        self.timeline_tree.column("split", width=160, anchor="e")
+        self.timeline_tree.column("pct", width=120, anchor="e")
+        self.timeline_tree.pack(fill="x", padx=8, pady=8)
         loc = ttk.LabelFrame(self.root, text="Local token totals fallback") ; loc.pack(fill="both", expand=True, padx=12, pady=4)
         for k in ["session", "today", "week", "all"]:
             self.labels[k] = tk.StringVar(value="Scanning...")
@@ -574,24 +631,28 @@ class App:
             history = query_usage_last_7_days()
             graph_rows = query_usage_last_5_hours()
             burn = self._calculate_burn(rate, history)
-            self.q.put((rate, totals, burn, graph_rows))
+            spikes = detect_usage_spikes(graph_rows, bool(self.config.get("include_cache_tokens")))
+            self.q.put((rate, totals, burn, graph_rows, spikes))
         except Exception as e:
             log(f"refresh failed: {e!r}")
             totals = {k: UsageTotals() for k in ["session","today","week","all"]}
             record = usage_record_error(str(e))
             append_usage_snapshot(record, totals, self.config)
-            self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="not enough data"), "week": BurnRateProjection(reason="not enough data")}, []))
+            self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="not enough data"), "week": BurnRateProjection(reason="not enough data")}, [], []))
     def _poll(self):
         try:
             while True:
                 item = self.q.get_nowait(); self._refreshing=False
                 if len(item) == 2:
-                    r,t = item; burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}; graph_rows = []
+                    r,t = item; burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}; graph_rows = []; spikes = []
                 elif len(item) == 3:
-                    r,t,burn = item; graph_rows = []
-                else:
+                    r,t,burn = item; graph_rows = []; spikes = []
+                elif len(item) == 4:
                     r,t,burn,graph_rows = item
-                self._update(r,t,burn,graph_rows)
+                    spikes = []
+                else:
+                    r,t,burn,graph_rows,spikes = item
+                self._update(r,t,burn,graph_rows,spikes)
         except queue.Empty: pass
         self.root.after(500, self._poll)
     def _scheduled(self):
@@ -737,8 +798,30 @@ class App:
         self._draw_line_graph("velocity", "Hourly token velocity", self._velocity_points(), "#8bd3ff", "/hr")
         self._draw_line_graph("burn", "Burn-rate trend", self._burn_trend_points(), "#d9a7ff", "%/hr")
         self._draw_dual_line_graph("io", "Input vs output totals", input_points, output_points, "input", "output")
-    def _update(self, r, totals, burn, graph_rows):
-        self.last_rate, self.last_totals, self.last_burn, self.last_graph_rows = r, totals, burn, graph_rows
+    def _format_spike_split(self, spike: UsageSpike) -> str:
+        if spike.input_increase is None and spike.output_increase is None:
+            return "n/a"
+        return f"{fmt(spike.input_increase or 0)} / {fmt(spike.output_increase or 0)}"
+    def _update_timeline(self):
+        if not hasattr(self, "timeline_tree"): return
+        self.timeline_tree.delete(*self.timeline_tree.get_children())
+        if not self.last_spikes:
+            self.timeline_tree.insert("", "end", values=("No spikes detected yet", "", "", ""))
+            return
+        for spike in self.last_spikes:
+            pct_text = "n/a" if spike.pct_increase is None else f"+{spike.pct_increase:.1f}%"
+            self.timeline_tree.insert(
+                "",
+                "end",
+                values=(
+                    spike.timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                    f"+{fmt(spike.token_increase)}",
+                    self._format_spike_split(spike),
+                    pct_text,
+                ),
+            )
+    def _update(self, r, totals, burn, graph_rows, spikes):
+        self.last_rate, self.last_totals, self.last_burn, self.last_graph_rows, self.last_spikes = r, totals, burn, graph_rows, spikes
         sp, wp, sr, wr, src = self._effective()
         if r.error:
             self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._forecast_summary()}")
@@ -748,6 +831,7 @@ class App:
             self.labels[k].set(f"In: {fmt(t.input_tokens)} | Out: {fmt(t.output_tokens)} | Cache: {fmt(t.cache_creation_input_tokens+t.cache_read_input_tokens)} | Requests: {fmt(t.requests)}")
         self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Statusline file: {STATUSLINE_LATEST}")
         self._draw_all_graphs()
+        self._update_timeline()
         if self.icon:
             self.icon.title = f"Claude Code Usage\nSession {sp:.1f}% resets {sr}\nWeek {wp:.1f}% resets {wr}"
             self.icon.icon = make_icon(self.spin_angle, sp)

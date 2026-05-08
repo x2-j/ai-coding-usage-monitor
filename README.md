@@ -10,6 +10,7 @@ Lightweight Windows monitor for Claude Code usage.
 - Adds a small floating desktop widget near the lower-left taskbar area.
 - The floating widget shows Session and Weekly usage/reset countdowns.
 - The widget logo animates briefly whenever data refreshes.
+- Adds a Session Timeline section that flags large usage spikes from local history.
 - Refresh interval defaults to 10 seconds and is configurable in Settings.
 
 ## Important limitation
@@ -34,3 +35,4 @@ Debug log:
 - Tray icon may be hidden under the `^` hidden-icons menu.
 - Double-click the floating widget to open the main app.
 - The floating widget can be disabled in Settings.
+- Session Timeline spike entries are estimates from local snapshots and do not include prompts, responses, file names, or project paths.
