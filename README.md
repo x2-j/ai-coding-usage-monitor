@@ -23,6 +23,22 @@ This is not an official Windows Widgets Board widget. Windows 11 widgets that ap
 
 ## Install/run
 
+### Tauri migration app
+
+The cross-platform shell migration lives in `desktop/`.
+
+Development run:
+
+1. `cd desktop`
+2. `npm install`
+3. `npm run dev`
+
+From the repo root you can also run `start_tauri.bat`.
+
+The original Python app remains available during parity migration.
+
+### Legacy Python app
+
 1. Run `install.bat`
 2. Run `install_statusline.bat`
 3. Restart Claude Code or send one new Claude Code message so statusline data is written

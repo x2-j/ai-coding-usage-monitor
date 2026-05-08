@@ -10,6 +10,9 @@ Thumbs.db
 desktop.ini
 ehthumbs.db
 Icon?
+!desktop/src-tauri/icons/
+!desktop/src-tauri/icons/**
+!desktop/src-tauri/icons/icon.ico
 ._*
 .Spotlight-V100
 .Trashes
@@ -73,6 +76,8 @@ vite.svg
 # Electron/Tauri artifacts
 src-tauri/target/
 src-tauri/gen/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
 release/
 debug/
 out/
@@ -82,6 +87,7 @@ out/
 # ---------------------------------------------------------
 target/
 Cargo.lock
+!desktop/src-tauri/Cargo.lock
 
 # Keep Cargo.lock for applications if desired:
 #! Cargo.lock
@@ -297,6 +303,7 @@ generated/
 # Package Managers
 # ---------------------------------------------------------
 package-lock.json
+!desktop/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 

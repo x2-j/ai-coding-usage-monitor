@@ -79,6 +79,9 @@ THEMES = {
 
 DEFAULT_CONFIG = {
     "claude_log_dir": str(DEFAULT_CLAUDE_LOG_DIR),
+    "codex_home": str(DEFAULT_CODEX_HOME),
+    "codex_tracking_enabled": False,
+    "selected_provider_id": "claude_code",
     "refresh_seconds": 10,
     "session_hours": 5,
     "session_budget_tokens": 1000000,
@@ -678,6 +681,9 @@ class ClaudeCodeProviderAdapter(UsageProviderAdapter):
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(DEFAULT_CODEX_HOME))).expanduser()
 
+def configured_codex_home(cfg: Dict[str, Any]) -> Path:
+    return Path(cfg.get("codex_home") or codex_home()).expanduser()
+
 def find_codex_command() -> Optional[str]:
     # Prefer Windows cmd/exe shims so PowerShell execution policy does not block availability checks.
     for name in ("codex.cmd", "codex.exe", "codex"):
@@ -686,19 +692,94 @@ def find_codex_command() -> Optional[str]:
             return found
     return None
 
+def iter_usage_dicts(obj: Any):
+    if isinstance(obj, dict):
+        for key in ("last_token_usage", "usage", "token_usage", "total_token_usage"):
+            usage = obj.get(key)
+            if isinstance(usage, dict):
+                yield usage
+        for value in obj.values():
+            yield from iter_usage_dicts(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from iter_usage_dicts(value)
+
+def codex_usage_record_from_event(obj: Dict[str, Any], fallback_ts: float) -> Optional[UsageRecord]:
+    usage = next(iter_usage_dicts(obj), None)
+    if not usage:
+        return None
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    model = find_first_key(obj, ("model", "model_name", "modelName"))
+    input_tokens = to_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+    output_tokens = to_int(usage.get("output_tokens") or usage.get("completion_tokens"))
+    cache_read_tokens = to_int(input_details.get("cached_tokens") or usage.get("cached_input_tokens") or usage.get("cached_tokens") or usage.get("cache_read_tokens"))
+    if input_tokens <= 0 and output_tokens <= 0 and cache_read_tokens <= 0:
+        return None
+    return UsageRecord(
+        provider_name="OpenAI",
+        model_name=str(model) if model else None,
+        timestamp=parse_ts(find_first_key(obj, ("timestamp", "created_at", "createdAt", "time", "ts")), fallback_ts),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_tokens,
+        source="Codex CLI local sessions (opt-in)",
+    )
+
+def scan_codex_usage(cfg: Dict[str, Any]) -> Tuple[Optional[UsageRecord], Dict[str, UsageTotals]]:
+    root = configured_codex_home(cfg) / "sessions"
+    now = datetime.now().astimezone()
+    session_start, weekly_start = now - timedelta(hours=float(cfg.get("session_hours", 5))), week_start(now)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    totals = {k: UsageTotals() for k in ["session", "today", "week", "all"]}
+    latest: Optional[UsageRecord] = None
+    if not root.exists():
+        return None, totals
+    records: Dict[str, UsageRecord] = {}
+    for path in root.rglob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line_no, line in enumerate(f, 1):
+                    try: obj = json.loads(line)
+                    except Exception: continue
+                    if not isinstance(obj, dict): continue
+                    rec = codex_usage_record_from_event(obj, mtime)
+                    if not rec: continue
+                    rid = find_first_key(obj, ("request_id", "requestId", "response_id", "responseId", "id"))
+                    key = str(rid) if rid else f"{path.name}:{line_no}"
+                    old = records.get(key)
+                    if old is None or rec.total_with_cache >= old.total_with_cache: records[key] = rec
+        except Exception as e:
+            log(f"Codex local session scan skipped {path.name}: {e!r}")
+    for rec in records.values():
+        if latest is None or rec.timestamp > latest.timestamp:
+            latest = rec
+        keys = ["all"]
+        if rec.timestamp >= session_start: keys.append("session")
+        if rec.timestamp >= today_start: keys.append("today")
+        if rec.timestamp >= weekly_start: keys.append("week")
+        for key in keys:
+            total = totals[key]
+            total.input_tokens += rec.input_tokens
+            total.output_tokens += rec.output_tokens
+            total.cache_creation_input_tokens += rec.cache_creation_input_tokens
+            total.cache_read_input_tokens += rec.cache_read_input_tokens
+            total.requests += 1
+    return latest, totals
+
 class CodexCliProviderAdapter(UsageProviderAdapter):
     provider_id = "openai_codex_cli"
     provider_name = "OpenAI"
     display_label = "OpenAI Codex CLI"
-    availability_only = True
 
     def __init__(self, cfg: Dict[str, Any]):
         super().__init__(cfg)
         self.last_version: Optional[str] = None
+        self._last_snapshot: Optional[ProviderUsageSnapshot] = None
 
     def check_availability(self) -> ProviderAvailability:
         cmd = find_codex_command()
-        home = codex_home()
+        home = configured_codex_home(self.cfg)
         config_path = home / "config.toml"
         if not cmd:
             self.error_state = "Codex CLI is not on PATH."
@@ -714,21 +795,36 @@ class CodexCliProviderAdapter(UsageProviderAdapter):
             self.error_state = f"Codex CLI version check exited with {result.returncode}."
             return ProviderAvailability(False, "Codex CLI", self.error_state, False)
         config_note = "config present" if config_path.exists() else "config not found"
+        if not self.cfg.get("codex_tracking_enabled"):
+            self.error_state = "Codex CLI detected, but local tracking is disabled."
+            return ProviderAvailability(True, "Codex CLI", f"{version}; {config_note}; local tracking disabled.", False)
+        latest, totals = scan_codex_usage(self.cfg)
+        if latest is None or totals["all"].requests <= 0:
+            self.error_state = "Codex CLI tracking enabled, but no local token usage records were found."
+            return ProviderAvailability(True, "Codex CLI local sessions", f"{version}; {config_note}; no local usage records found yet.", False)
+        self._last_snapshot = ProviderUsageSnapshot(latest, totals)
         self.error_state = None
-        return ProviderAvailability(True, "Codex CLI", f"{version}; {config_note}; usage unavailable without opt-in instrumentation.", False)
+        return ProviderAvailability(True, "Codex CLI local sessions", f"{version}; {config_note}; local usage records found.", True)
 
     def latest_usage_snapshot(self) -> UsageRecord:
-        availability = self.check_availability()
-        message = "Codex CLI usage tracking is availability-only. Exact local usage is not exposed by a safe supported local source yet."
-        if not availability.available and availability.message:
-            message = availability.message
-        self.error_state = message
+        if self._last_snapshot is None:
+            self.check_availability()
+        if self._last_snapshot is not None:
+            return self._last_snapshot.record
+        message = self.error_state or "Codex CLI tracking enabled, but no local token usage records were found."
         return UsageRecord(
             provider_name=self.provider_name,
             timestamp=datetime.now().astimezone(),
-            source="Codex CLI availability",
+            source="Codex CLI local sessions (opt-in)",
             error=message,
         )
+
+    def import_history(self) -> Dict[str, UsageTotals]:
+        if self._last_snapshot is None:
+            self.check_availability()
+        if self._last_snapshot is not None:
+            return self._last_snapshot.totals
+        return {k: UsageTotals() for k in ["session", "today", "week", "all"]}
 
 def available_provider_adapters(cfg: Dict[str, Any]) -> Dict[str, UsageProviderAdapter]:
     return {
@@ -742,6 +838,13 @@ def visible_provider_adapters(providers: Dict[str, UsageProviderAdapter]) -> Dic
         for provider_id, provider in providers.items()
         if not provider.availability_only and provider.check_availability().has_data
     }
+
+def select_active_provider(providers: Dict[str, UsageProviderAdapter], cfg: Dict[str, Any]) -> Optional[UsageProviderAdapter]:
+    visible = visible_provider_adapters(providers)
+    selected = str(cfg.get("selected_provider_id") or "")
+    if selected in visible:
+        return visible[selected]
+    return next(iter(visible.values()), None)
 
 def make_icon(angle: int = 0, session_pct: float = 0.0):
     if Image is None: return None
@@ -766,7 +869,7 @@ class App:
         self._configure_ttk_theme()
         self.providers = available_provider_adapters(self.config)
         self.visible_providers = visible_provider_adapters(self.providers)
-        self.provider: Optional[UsageProviderAdapter] = next(iter(self.visible_providers.values()), None)
+        self.provider: Optional[UsageProviderAdapter] = select_active_provider(self.providers, self.config)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading usage data...")
         self.state_label = tk.StringVar(value="Loading")
@@ -884,29 +987,50 @@ class App:
             self.provider_window.deiconify(); self.provider_window.lift(); return
         w = tk.Toplevel(self.root); self.provider_window = w; w.title("Providers"); w.geometry("620x360"); w.minsize(560, 320); w.configure(bg=self.colors["bg"], padx=12, pady=12)
         ttk.Label(w, text="Providers", font=("Segoe UI", 13, "bold")).pack(anchor="w")
-        ttk.Label(w, text="Only providers with local usage data appear in the main monitor. Installed tools without a safe usage source stay hidden.", wraplength=570).pack(anchor="w", pady=(2,10))
+        ttk.Label(w, text="Only providers with local usage data appear in the main monitor. Codex tracking is opt-in and stores token counters only.", wraplength=570).pack(anchor="w", pady=(2,10))
         for provider in self.providers.values():
             availability = provider.check_availability()
             status = "Shown in monitor" if provider.provider_id in self.visible_providers else "Hidden until usage data is available"
-            if provider.availability_only:
-                status = "Installed, but usage tracking needs opt-in instrumentation"
+            if provider.provider_id == CodexCliProviderAdapter.provider_id and not self.config.get("codex_tracking_enabled"):
+                status = "Detected, tracking disabled"
             row = ttk.LabelFrame(w, text=provider.display_label)
             row.pack(fill="x", pady=5)
             ttk.Label(row, text=f"{status}\n{availability.message or availability.source}", justify="left", wraplength=540).pack(anchor="w", padx=10, pady=8)
             actions = ttk.Frame(row); actions.pack(fill="x", padx=10, pady=(0,8))
             if provider.provider_id == ClaudeCodeProviderAdapter.provider_id:
                 ttk.Button(actions, text="Open Claude Usage", command=lambda: webbrowser.open("https://claude.ai/settings/usage")).pack(side="left")
+                if provider.provider_id in self.visible_providers:
+                    ttk.Button(actions, text="Use in Monitor", command=lambda: self.use_provider(ClaudeCodeProviderAdapter.provider_id)).pack(side="left", padx=6)
             elif provider.provider_id == CodexCliProviderAdapter.provider_id:
                 ttk.Button(actions, text="Open Codex Usage", command=lambda: webbrowser.open("https://chatgpt.com/codex/settings/usage")).pack(side="left")
-                ttk.Button(actions, text="Enable Tracking", command=self.explain_codex_tracking).pack(side="left", padx=6)
+                ttk.Button(actions, text="Enable Tracking", command=self.enable_codex_tracking).pack(side="left", padx=6)
+                if provider.provider_id in self.visible_providers:
+                    ttk.Button(actions, text="Use in Monitor", command=lambda: self.use_provider(CodexCliProviderAdapter.provider_id)).pack(side="left", padx=6)
         w.protocol("WM_DELETE_WINDOW", lambda: (w.destroy(), setattr(self, "provider_window", None)))
-    def explain_codex_tracking(self):
+    def enable_codex_tracking(self):
+        self.config["codex_tracking_enabled"] = True
+        self.config["selected_provider_id"] = CodexCliProviderAdapter.provider_id
+        save_config(self.config)
+        self.providers = available_provider_adapters(self.config)
+        self.visible_providers = visible_provider_adapters(self.providers)
+        self.provider = select_active_provider(self.providers, self.config)
+        if self.provider_window and self.provider_window.winfo_exists():
+            self.provider_window.destroy()
+            self.provider_window = None
         messagebox.showinfo(
-            "OpenAI Codex CLI tracking",
-            "Codex CLI is detected, but this app does not yet have a safe exact usage source for it.\n\n"
-            "The next supported path is opt-in instrumentation around `codex exec --json` or an explicit OpenAI Usage API integration. "
-            "This app will not read Codex auth, transcripts, history, logs, or SQLite rows by default.",
+            "OpenAI Codex tracking enabled",
+            "Codex local tracking is now enabled. The monitor will read Codex session JSONL files and extract only token counters, timestamps, and model names.\n\n"
+            "It does not store prompt text, response text, tool output, auth data, or workspace paths.",
         )
+        self.refresh()
+    def use_provider(self, provider_id: str):
+        self.config["selected_provider_id"] = provider_id
+        save_config(self.config)
+        self.provider = self.visible_providers.get(provider_id) or select_active_provider(self.providers, self.config)
+        if self.provider_window and self.provider_window.winfo_exists():
+            self.provider_window.destroy()
+            self.provider_window = None
+        self.refresh()
     def _start_tray(self):
         if pystray is None:
             log("pystray/Pillow unavailable; no tray icon")
@@ -945,7 +1069,7 @@ class App:
             for provider in self.providers.values():
                 provider.cfg = self.config
             self.visible_providers = visible_provider_adapters(self.providers)
-            self.provider = next(iter(self.visible_providers.values()), None)
+            self.provider = select_active_provider(self.providers, self.config)
             if self.provider is None:
                 log("no provider usage data found; hiding provider sections")
                 totals = {k: UsageTotals() for k in ["session","today","week","all"]}
@@ -1189,11 +1313,14 @@ class App:
             return
         if r.error:
             self.rate_label.set(f"Error\nProvider data unavailable: {r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._forecast_summary()}")
+        elif self.provider and self.provider.provider_id == CodexCliProviderAdapter.provider_id:
+            self.rate_label.set(f"OpenAI Codex CLI local estimate\nSession window: {sp:.1f}% of configured fallback budget\nWeekly window: {wp:.1f}% of configured fallback budget\n{self._forecast_summary()}\nSource: {src}")
         else:
             self.rate_label.set(f"Session / 5-hour limit: {sp:.1f}% used - resets in {sr}\nWeekly / 7-day limit: {wp:.1f}% used - resets in {wr}\n{self._forecast_summary()}\nSource: {src}")
         for k,t in totals.items():
             self.labels[k].set(f"In: {fmt(t.input_tokens)} | Out: {fmt(t.output_tokens)} | Cache: {fmt(t.cache_creation_input_tokens+t.cache_read_input_tokens)} | Requests: {fmt(t.requests)}")
-        self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Statusline file: {STATUSLINE_LATEST}")
+        provider_label = self.provider.display_label if self.provider else "No provider"
+        self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Provider: {provider_label}")
         self._draw_all_graphs()
         self._update_timeline()
         if self.icon:
@@ -1368,32 +1495,40 @@ class App:
         if self.icon: self.root.withdraw()
         else: self.quit()
     def settings(self):
-        w=tk.Toplevel(self.root); w.title("Settings"); w.geometry("670x525"); fields={}
+        w=tk.Toplevel(self.root); w.title("Settings"); w.geometry("720x640"); fields={}
         w.configure(bg=self.colors["bg"])
-        items=[("refresh_seconds","Refresh seconds"),("claude_log_dir","Claude log folder"),("session_budget_tokens","Local fallback session budget tokens"),("weekly_budget_tokens","Local fallback weekly budget tokens"),("session_hours","Local fallback session window hours")]
+        items=[("refresh_seconds","Refresh seconds"),("claude_log_dir","Claude log folder"),("codex_home","Codex home folder"),("session_budget_tokens","Local fallback session budget tokens"),("weekly_budget_tokens","Local fallback weekly budget tokens"),("session_hours","Local fallback session window hours")]
         for i,(k,label) in enumerate(items):
             ttk.Label(w,text=label).grid(row=i,column=0,sticky="w",padx=12,pady=8); v=tk.StringVar(value=str(self.config.get(k,""))); fields[k]=v; ttk.Entry(w,textvariable=v,width=58).grid(row=i,column=1,sticky="ew",padx=12,pady=8)
-        start=tk.BooleanVar(value=bool(self.config.get("start_minimized",False))); cache=tk.BooleanVar(value=bool(self.config.get("include_cache_tokens",False))); widget=tk.BooleanVar(value=bool(self.config.get("show_desktop_widget",True)))
+        start=tk.BooleanVar(value=bool(self.config.get("start_minimized",False))); cache=tk.BooleanVar(value=bool(self.config.get("include_cache_tokens",False))); widget=tk.BooleanVar(value=bool(self.config.get("show_desktop_widget",True))); codex_tracking=tk.BooleanVar(value=bool(self.config.get("codex_tracking_enabled",False)))
         widget_mode=tk.StringVar(value=self._widget_mode())
         theme_mode=tk.StringVar(value=self._theme_mode())
-        ttk.Label(w,text="Widget display mode").grid(row=5,column=0,sticky="w",padx=12,pady=8)
-        ttk.Combobox(w,textvariable=widget_mode,values=WIDGET_DISPLAY_MODES,state="readonly",width=18).grid(row=5,column=1,sticky="w",padx=12,pady=8)
-        ttk.Label(w,text="Theme").grid(row=6,column=0,sticky="w",padx=12,pady=8)
-        ttk.Combobox(w,textvariable=theme_mode,values=THEME_MODES,state="readonly",width=18).grid(row=6,column=1,sticky="w",padx=12,pady=8)
-        ttk.Checkbutton(w,text="Start minimized to tray",variable=start).grid(row=7,column=0,columnspan=2,sticky="w",padx=12,pady=8)
-        ttk.Checkbutton(w,text="Show floating desktop widget on startup",variable=widget).grid(row=8,column=0,columnspan=2,sticky="w",padx=12,pady=8)
-        ttk.Checkbutton(w,text="Include cache tokens in local estimates",variable=cache).grid(row=9,column=0,columnspan=2,sticky="w",padx=12,pady=8)
-        ttk.Label(w,text=f"Config: {CONFIG_PATH}",wraplength=630).grid(row=10,column=0,columnspan=2,sticky="w",padx=12,pady=8)
+        row = len(items)
+        ttk.Label(w,text="Widget display mode").grid(row=row,column=0,sticky="w",padx=12,pady=8)
+        ttk.Combobox(w,textvariable=widget_mode,values=WIDGET_DISPLAY_MODES,state="readonly",width=18).grid(row=row,column=1,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Label(w,text="Theme").grid(row=row,column=0,sticky="w",padx=12,pady=8)
+        ttk.Combobox(w,textvariable=theme_mode,values=THEME_MODES,state="readonly",width=18).grid(row=row,column=1,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Checkbutton(w,text="Start minimized to tray",variable=start).grid(row=row,column=0,columnspan=2,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Checkbutton(w,text="Show floating desktop widget on startup",variable=widget).grid(row=row,column=0,columnspan=2,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Checkbutton(w,text="Enable OpenAI Codex local tracking (token counters only)",variable=codex_tracking).grid(row=row,column=0,columnspan=2,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Checkbutton(w,text="Include cache tokens in local estimates",variable=cache).grid(row=row,column=0,columnspan=2,sticky="w",padx=12,pady=8)
+        row += 1
+        ttk.Label(w,text=f"Config: {CONFIG_PATH}",wraplength=630).grid(row=row,column=0,columnspan=2,sticky="w",padx=12,pady=8)
         def save():
             for k,v in fields.items():
                 val=v.get().strip()
-                if k != "claude_log_dir":
+                if k not in ("claude_log_dir", "codex_home"):
                     try: val=int(float(val))
                     except Exception: messagebox.showerror("Invalid setting", f"{k} must be a number"); return
                     if k=="refresh_seconds" and val < 1: messagebox.showerror("Invalid setting", "Refresh must be at least 1 second"); return
                 self.config[k]=val
-            self.config["start_minimized"]=bool(start.get()); self.config["include_cache_tokens"]=bool(cache.get()); self.config["show_desktop_widget"]=bool(widget.get()); self.config["widget_display_mode"]=normalized_widget_mode(widget_mode.get()); self.config["theme_mode"]=normalized_theme_mode(theme_mode.get()); save_config(self.config); w.destroy(); self._apply_theme(); self._apply_widget_mode(); self.refresh()
-        ttk.Button(w,text="Save",command=save).grid(row=11,column=1,sticky="e",padx=12,pady=12)
+            self.config["start_minimized"]=bool(start.get()); self.config["include_cache_tokens"]=bool(cache.get()); self.config["show_desktop_widget"]=bool(widget.get()); self.config["codex_tracking_enabled"]=bool(codex_tracking.get()); self.config["widget_display_mode"]=normalized_widget_mode(widget_mode.get()); self.config["theme_mode"]=normalized_theme_mode(theme_mode.get()); save_config(self.config); self.providers=available_provider_adapters(self.config); self.visible_providers=visible_provider_adapters(self.providers); self.provider=select_active_provider(self.providers,self.config); w.destroy(); self._apply_theme(); self._apply_widget_mode(); self.refresh()
+        ttk.Button(w,text="Save",command=save).grid(row=row+1,column=1,sticky="e",padx=12,pady=12)
     def quit(self):
         try:
             if self.icon: self.icon.stop()

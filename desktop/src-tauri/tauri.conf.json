@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Simple AI Usage Monitor",
+  "version": "0.7.0-migration.0",
+  "identifier": "local.simple-ai-usage-monitor",
+  "build": {
+    "beforeDevCommand": "npm run check",
+    "beforeBuildCommand": "npm run check",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Simple AI Usage Monitor",
+        "width": 980,
+        "height": 900,
+        "minWidth": 860,
+        "minHeight": 720,
+        "visible": true,
+        "center": true
+      },
+      {
+        "label": "widget",
+        "title": "AI Usage",
+        "url": "/",
+        "width": 260,
+        "height": 150,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "DeveloperTool",
+    "shortDescription": "Local-first AI coding-agent usage monitor",
+    "longDescription": "A local-first usage monitor for AI coding agents with tray and floating widget views.",
+    "externalBin": ["bin/statusline_capture"],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      }
+    },
+    "resources": []
+  }
+}
