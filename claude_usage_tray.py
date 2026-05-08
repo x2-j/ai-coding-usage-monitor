@@ -50,6 +50,32 @@ class UsageTotals:
     def total_with_cache(self) -> int: return self.visible_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
 
 @dataclass
+class UsageRecord:
+    provider_name: str
+    timestamp: datetime
+    source: str
+    model_name: Optional[str] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    session_usage_pct: Optional[float] = None
+    weekly_usage_pct: Optional[float] = None
+    session_reset_time: Optional[Any] = None
+    weekly_reset_time: Optional[Any] = None
+    requests: int = 1
+    error: Optional[str] = None
+
+    @property
+    def visible_tokens(self) -> int: return self.input_tokens + self.output_tokens
+    @property
+    def cache_tokens(self) -> int: return self.cache_creation_input_tokens + self.cache_read_input_tokens
+    @property
+    def total_with_cache(self) -> int: return self.visible_tokens + self.cache_tokens
+    def to_totals(self) -> UsageTotals:
+        return UsageTotals(self.input_tokens, self.output_tokens, self.cache_creation_input_tokens, self.cache_read_input_tokens, self.requests)
+
+@dataclass
 class RateLimitUsage:
     session_pct: Optional[float] = None
     session_reset: Optional[Any] = None
@@ -57,6 +83,9 @@ class RateLimitUsage:
     weekly_reset: Optional[Any] = None
     source: str = "local estimate"
     error: Optional[str] = None
+    @classmethod
+    def from_record(cls, record: UsageRecord) -> "RateLimitUsage":
+        return cls(record.session_usage_pct, record.session_reset_time, record.weekly_usage_pct, record.weekly_reset_time, record.source, record.error)
 
 def log(msg: str) -> None:
     try:
@@ -113,6 +142,28 @@ def find_usage_dict(obj: Any) -> Optional[Dict[str, Any]]:
             if r: return r
     return None
 
+def normalize_pct(v: Any) -> Optional[float]:
+    try:
+        if v is None: return None
+        p = float(v)
+        return p * 100 if 0 <= p <= 1 else p
+    except Exception: return None
+
+def usage_record_from_log(obj: Dict[str, Any], fallback_ts: float) -> Optional[UsageRecord]:
+    usage = find_usage_dict(obj)
+    if not usage: return None
+    model = find_first_key(obj, ("model", "model_name", "modelName"))
+    return UsageRecord(
+        provider_name="Anthropic",
+        model_name=str(model) if model else None,
+        timestamp=parse_ts(find_first_key(obj, ("timestamp", "created_at", "createdAt", "time")), fallback_ts),
+        input_tokens=to_int(usage.get("input_tokens")),
+        output_tokens=to_int(usage.get("output_tokens")),
+        cache_creation_input_tokens=to_int(usage.get("cache_creation_input_tokens")),
+        cache_read_input_tokens=to_int(usage.get("cache_read_input_tokens")),
+        source="Claude Code local logs",
+    )
+
 def week_start(dt: datetime) -> datetime:
     s = dt.astimezone() - timedelta(days=dt.astimezone().weekday())
     return s.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -124,7 +175,7 @@ def scan_usage(cfg: Dict[str, Any]) -> Dict[str, UsageTotals]:
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     totals = {k: UsageTotals() for k in ["session", "today", "week", "all"]}
     if not root.exists(): return totals
-    records: Dict[str, Tuple[datetime, UsageTotals]] = {}
+    records: Dict[str, UsageRecord] = {}
     for path in root.rglob("*.jsonl"):
         try:
             mtime = path.stat().st_mtime
@@ -132,20 +183,18 @@ def scan_usage(cfg: Dict[str, Any]) -> Dict[str, UsageTotals]:
                 for line_no, line in enumerate(f, 1):
                     try: obj = json.loads(line)
                     except Exception: continue
-                    usage = find_usage_dict(obj)
-                    if not usage: continue
+                    rec = usage_record_from_log(obj, mtime)
+                    if not rec: continue
                     rid = find_first_key(obj, ("requestId", "request_id", "message_id", "uuid", "id"))
                     key = str(rid) if rid else f"{path}:{line_no}"
-                    ts = parse_ts(find_first_key(obj, ("timestamp", "created_at", "createdAt", "time")), mtime)
-                    rec = UsageTotals(to_int(usage.get("input_tokens")), to_int(usage.get("output_tokens")), to_int(usage.get("cache_creation_input_tokens")), to_int(usage.get("cache_read_input_tokens")), 1)
                     old = records.get(key)
-                    if old is None or rec.total_with_cache >= old[1].total_with_cache: records[key] = (ts, rec)
+                    if old is None or rec.total_with_cache >= old.total_with_cache: records[key] = rec
         except Exception as e: log(f"scan skipped {path}: {e!r}")
-    for ts, rec in records.values():
+    for rec in records.values():
         keys = ["all"]
-        if ts >= session_start: keys.append("session")
-        if ts >= today_start: keys.append("today")
-        if ts >= weekly_start: keys.append("week")
+        if rec.timestamp >= session_start: keys.append("session")
+        if rec.timestamp >= today_start: keys.append("today")
+        if rec.timestamp >= weekly_start: keys.append("week")
         for k in keys:
             t = totals[k]
             t.input_tokens += rec.input_tokens; t.output_tokens += rec.output_tokens
@@ -175,31 +224,50 @@ def countdown(v: Any) -> str:
 
 def fmt(n: int) -> str: return f"{n:,}"
 
-def read_statusline_usage() -> RateLimitUsage:
-    if not STATUSLINE_LATEST.exists():
-        return RateLimitUsage(error="No Claude Code statusline data yet. Run install_statusline.bat, then send one message in Claude Code.")
-    try: data = json.loads(STATUSLINE_LATEST.read_text(encoding="utf-8"))
-    except Exception as e: return RateLimitUsage(error=f"Could not read statusline data: {e}")
+def usage_record_error(message: str, source: str = "Claude Code statusline") -> UsageRecord:
+    return UsageRecord(provider_name="Anthropic", timestamp=datetime.now().astimezone(), source=source, error=message)
+
+def usage_record_from_statusline(data: Dict[str, Any]) -> UsageRecord:
     if isinstance(data.get("raw"), dict): data = data["raw"]
     rl = data.get("rate_limits") or data.get("rate_limit") or {}
     five = rl.get("five_hour") or rl.get("session") or {}
     seven = rl.get("seven_day") or rl.get("weekly") or {}
+    usage = find_usage_dict(data) or {}
     sp = five.get("used_percentage", five.get("utilization")) if isinstance(five, dict) else None
     wp = seven.get("used_percentage", seven.get("utilization")) if isinstance(seven, dict) else None
     sr = five.get("resets_at", five.get("reset_at")) if isinstance(five, dict) else None
     wr = seven.get("resets_at", seven.get("reset_at")) if isinstance(seven, dict) else None
-    # tolerate fraction form, e.g. 0.07 = 7%
-    try:
-        if sp is not None:
-            sp = float(sp); sp = sp * 100 if 0 <= sp <= 1 else sp
-    except Exception: sp = None
-    try:
-        if wp is not None:
-            wp = float(wp); wp = wp * 100 if 0 <= wp <= 1 else wp
-    except Exception: wp = None
-    if sp is None and wp is None:
-        return RateLimitUsage(error="Statusline file exists, but it has no recognized rate_limits fields. Fallback local totals are being used.")
-    return RateLimitUsage(sp, sr, wp, wr, "Claude Code statusline", None)
+    model = find_first_key(data, ("model", "model_name", "modelName"))
+    provider = find_first_key(data, ("provider", "provider_name", "providerName")) or "Anthropic"
+    ts = parse_ts(find_first_key(data, ("timestamp", "created_at", "createdAt", "time")), time.time())
+    return UsageRecord(
+        provider_name=str(provider),
+        model_name=str(model) if model else None,
+        timestamp=ts,
+        input_tokens=to_int(usage.get("input_tokens")),
+        output_tokens=to_int(usage.get("output_tokens")),
+        cache_creation_input_tokens=to_int(usage.get("cache_creation_input_tokens")),
+        cache_read_input_tokens=to_int(usage.get("cache_read_input_tokens")),
+        session_usage_pct=normalize_pct(sp),
+        weekly_usage_pct=normalize_pct(wp),
+        session_reset_time=sr,
+        weekly_reset_time=wr,
+        source="Claude Code statusline",
+        requests=0,
+    )
+
+def read_statusline_record() -> UsageRecord:
+    if not STATUSLINE_LATEST.exists():
+        return usage_record_error("No Claude Code statusline data yet. Run install_statusline.bat, then send one message in Claude Code.")
+    try: data = json.loads(STATUSLINE_LATEST.read_text(encoding="utf-8"))
+    except Exception as e: return usage_record_error(f"Could not read statusline data: {e}")
+    record = usage_record_from_statusline(data)
+    if record.session_usage_pct is None and record.weekly_usage_pct is None:
+        return usage_record_error("Statusline file exists, but it has no recognized rate_limits fields. Fallback local totals are being used.")
+    return record
+
+def read_statusline_usage() -> RateLimitUsage:
+    return RateLimitUsage.from_record(read_statusline_record())
 
 def make_icon(angle: int = 0, session_pct: float = 0.0):
     if Image is None: return None
