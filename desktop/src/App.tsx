@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   CartesianGrid,
@@ -10,6 +10,7 @@ import {
   YAxis
 } from "recharts";
 import {
+  calibrateClaudeSession,
   enableCodexTracking,
   getMonitorState,
   openUsagePage,
@@ -38,6 +39,13 @@ const emptyTotals: UsageTotals = {
   visible_tokens: 0,
   total_tokens: 0
 };
+
+type UsageTrendKind = "up" | "reset";
+type UsageTrend = {
+  kind: UsageTrendKind;
+  severity: "normal" | "warning" | "critical";
+};
+type UsageTrendMap = Record<string, { session?: UsageTrend; weekly?: UsageTrend }>;
 
 function fmt(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "n/a";
@@ -95,6 +103,74 @@ function chartKey(providerId: string, metric: string) {
   return `${providerId.replace(/[^a-zA-Z0-9_]/g, "_")}_${metric}`;
 }
 
+function trendSeverity(value: number | null | undefined): UsageTrend["severity"] {
+  if (value !== null && value !== undefined && !Number.isNaN(value) && value > 90) return "critical";
+  if (value !== null && value !== undefined && !Number.isNaN(value) && value > 80) return "warning";
+  return "normal";
+}
+
+function compareUsageValue(previous: number | null | undefined, next: number | null | undefined): UsageTrend | undefined {
+  if (previous === null || previous === undefined || Number.isNaN(previous) || next === null || next === undefined || Number.isNaN(next)) {
+    return undefined;
+  }
+  if (next > previous) return { kind: "up", severity: trendSeverity(next) };
+  if (next < previous) return { kind: "reset", severity: "normal" };
+  return undefined;
+}
+
+function usageTrends(previous: MonitorState | null, next: MonitorState): UsageTrendMap {
+  if (!previous) return {};
+  const previousByProvider = new Map(previous.provider_usages.map((usage) => [usage.provider_id, usage]));
+  return Object.fromEntries(next.provider_usages.map((usage) => {
+    const prior = previousByProvider.get(usage.provider_id);
+    return [usage.provider_id, {
+      session: compareUsageValue(prior?.snapshot.session_usage_percent, usage.snapshot.session_usage_percent),
+      weekly: compareUsageValue(prior?.snapshot.weekly_usage_percent, usage.snapshot.weekly_usage_percent)
+    }];
+  }));
+}
+
+function TrendIcon({ trend }: { trend?: UsageTrend }) {
+  if (!trend) return null;
+  const label = trend.kind === "up" ? "Usage increased on last refresh" : "Usage reset or decreased on last refresh";
+  return (
+    <span className={`trend-icon ${trend.kind} ${trend.severity}`} title={label} aria-label={label}>
+      {trend.kind === "up" ? <ArrowUpIcon /> : <ResetArrowIcon />}
+    </span>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 16V4" />
+      <path d="M5 9l5-5 5 5" />
+    </svg>
+  );
+}
+
+function ResetArrowIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M15.7 8.5a6 6 0 1 0 1 5" />
+      <path d="M15.7 8.5h-4.4" />
+      <path d="M15.7 8.5V4.1" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg className={`chevron-icon ${expanded ? "expanded" : ""}`} viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M7 4l6 6-6 6" />
+    </svg>
+  );
+}
+
+function MiniIcon({ kind }: { kind: "clock" | "bolt" | "gauge" | "tokens" | "cache" | "requests" | "provider" }) {
+  return <span className={`mini-icon ${kind}`} aria-hidden="true" />;
+}
+
 export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +178,14 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(() => new Set());
   const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(() => new Set());
+  const [trends, setTrends] = useState<UsageTrendMap>({});
+  const stateRef = useRef<MonitorState | null>(null);
+
+  function applyMonitorState(next: MonitorState) {
+    setTrends(usageTrends(stateRef.current, next));
+    stateRef.current = next;
+    setState(next);
+  }
 
   useEffect(() => {
     try {
@@ -110,14 +194,14 @@ export default function App() {
       setWindowLabel("main");
     }
     installTray().catch(() => undefined);
-    getMonitorState().then(setState).catch((e) => setError(String(e)));
+    getMonitorState().then(applyMonitorState).catch((e) => setError(String(e)));
   }, []);
 
   useEffect(() => {
     if (!state) return;
     const ms = Math.max(1, state.settings.refresh_seconds) * 1000;
     const id = window.setInterval(() => {
-      refreshUsage().then(setState).catch((e) => setError(String(e)));
+      refreshUsage().then(applyMonitorState).catch((e) => setError(String(e)));
     }, ms);
     return () => window.clearInterval(id);
   }, [state?.settings.refresh_seconds]);
@@ -173,14 +257,27 @@ export default function App() {
   }
 
   if (windowLabel === "widget") {
-    return <WidgetView state={state} onOpen={() => showWindow("main")} />;
+    return <WidgetView state={state} trends={trends} onOpen={() => showWindow("main")} />;
   }
 
   async function updateSettings(next: AppSettings) {
     setSaving(true);
     try {
       const updated = await saveSettings(next);
-      setState(updated);
+      applyMonitorState(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function calibrateSession(percent: number) {
+    setSaving(true);
+    try {
+      const updated = await calibrateClaudeSession(percent);
+      setError(`Claude session calibrated at ${percent.toFixed(1)}%.`);
+      applyMonitorState(updated);
+    } catch (e) {
+      setError(String(e));
     } finally {
       setSaving(false);
     }
@@ -197,7 +294,7 @@ export default function App() {
       </header>
 
       <section className="toolbar">
-        <button onClick={() => refreshUsage().then(setState)}>Refresh</button>
+        <button onClick={() => refreshUsage().then(applyMonitorState)}>Refresh</button>
         <button onClick={() => showWindow("widget")}>Show Widget</button>
         <button onClick={() => openUsagePage()}>Open Usage Page</button>
         <button onClick={() => setupStatusline().then((message) => setError(message))}>Install Statusline</button>
@@ -301,20 +398,24 @@ export default function App() {
                 return next;
               })}
               usage={usage}
+              trends={trends[usage.provider_id]}
+              calibration={state.settings}
+              saving={saving}
+              onCalibrate={calibrateSession}
             />
           ))
         )}
       </section>
 
       <section className="grid two">
-        <ProvidersPanel state={state} onEnableCodex={() => enableCodexTracking().then(setState)} />
+        <ProvidersPanel state={state} onEnableCodex={() => enableCodexTracking().then(applyMonitorState)} />
         <SettingsPanel state={state} saving={saving} onSave={updateSettings} />
       </section>
     </main>
   );
 }
 
-function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void }) {
+function WidgetView({ state, trends, onOpen }: { state: MonitorState; trends: UsageTrendMap; onOpen: () => void }) {
   const mode = state.settings.widget_display_mode;
   return (
     <main className={`widget ${mode}`} onDoubleClick={onOpen}>
@@ -327,7 +428,7 @@ function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void
       ) : (
         <>
           {state.provider_usages.map((usage) => (
-            <WidgetProviderRows key={usage.provider_id} usage={usage} />
+            <WidgetProviderRows key={usage.provider_id} trends={trends[usage.provider_id]} usage={usage} />
           ))}
           {state.provider_usages.length === 0 && <small>No provider data.</small>}
           {mode === "full" && <small>{state.status_message}</small>}
@@ -337,78 +438,176 @@ function WidgetView({ state, onOpen }: { state: MonitorState; onOpen: () => void
   );
 }
 
-function WidgetProviderRows({ usage }: { usage: ProviderUsage }) {
+function WidgetProviderRows({ usage, trends }: { usage: ProviderUsage; trends?: UsageTrendMap[string] }) {
   const snapshot = usage.snapshot;
   return (
     <div className="widget-provider">
       <strong>{usage.display_label}</strong>
-      <WidgetRow label="Session" value={limitValue(snapshot.session_usage_percent)} reset={snapshot.session_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot.session_reset_at)} />
-      <WidgetRow label="Weekly" value={limitValue(snapshot.weekly_usage_percent)} reset={snapshot.weekly_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot.weekly_reset_at)} />
+      <WidgetRow label="Session" trend={trends?.session} value={limitValue(snapshot.session_usage_percent)} reset={snapshot.session_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot.session_reset_at)} />
+      <WidgetRow label="Weekly" trend={trends?.weekly} value={limitValue(snapshot.weekly_usage_percent)} reset={snapshot.weekly_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot.weekly_reset_at)} />
     </div>
   );
 }
 
-function WidgetRow({ label, value, reset }: { label: string; value: string; reset: string }) {
-  return <div className="widget-row"><span>{label}</span><strong>{value}</strong><em>{reset}</em></div>;
+function WidgetRow({ label, value, reset, trend }: { label: string; value: string; reset: string; trend?: UsageTrend }) {
+  return <div className="widget-row"><span>{label}</span><strong><TrendIcon trend={trend} />{value}</strong><em>{reset}</em></div>;
 }
 
-function MetricCard({ title, value, sub }: { title: string; value: string; sub: string }) {
-  return <section className="metric"><span>{title}</span><strong>{value}</strong><small>{sub}</small></section>;
+function MetricCard({ title, value, sub, trend }: { title: string; value: string; sub: string; trend?: UsageTrend }) {
+  return (
+    <section className="metric">
+      <span><MiniIcon kind="gauge" />{title}</span>
+      <strong><TrendIcon trend={trend} /><span className="value-chip primary">{value}</span></strong>
+      <small><MiniIcon kind="clock" />{sub}</small>
+    </section>
+  );
+}
+
+function StatChip({ label, value, icon }: { label: string; value: string; icon?: "bolt" | "tokens" | "cache" | "requests" | "clock" | "gauge" }) {
+  return (
+    <span className="stat-chip">
+      {icon && <MiniIcon kind={icon} />}
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </span>
+  );
 }
 
 function TotalsCard({ title, totals }: { title: string; totals: UsageTotals }) {
   return (
     <section className="panel">
       <h2>{title} Token Totals</h2>
-      <p className="big">{fmt(totals.visible_tokens)} visible tokens</p>
-      <p>{fmt(totals.input_tokens)} input | {fmt(totals.output_tokens)} output</p>
-      <p>{fmt(totals.cache_read_tokens + totals.cache_write_tokens)} cache | {fmt(totals.requests)} requests</p>
+      <p className="big"><span className="value-chip">{fmt(totals.visible_tokens)}</span> visible tokens</p>
+      <div className="chip-row">
+        <StatChip icon="tokens" label="Input" value={fmt(totals.input_tokens)} />
+        <StatChip icon="tokens" label="Output" value={fmt(totals.output_tokens)} />
+        <StatChip icon="cache" label="Cache" value={fmt(totals.cache_read_tokens + totals.cache_write_tokens)} />
+        <StatChip icon="requests" label="Requests" value={fmt(totals.requests)} />
+      </div>
     </section>
   );
 }
 
-function ProviderUsagePanel({ collapsed, onToggle, usage }: { collapsed: boolean; onToggle: () => void; usage: ProviderUsage }) {
+function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, saving, onCalibrate }: { collapsed: boolean; onToggle: () => void; usage: ProviderUsage; trends?: UsageTrendMap[string]; calibration: AppSettings; saving: boolean; onCalibrate: (percent: number) => void }) {
   const snapshot = usage.snapshot;
   const session = usage.totals.session || emptyTotals;
   const week = usage.totals.week || emptyTotals;
+  const [calibrationPercent, setCalibrationPercent] = useState("");
+  const knownCalibration = calibration.claude_session_calibration_percent;
   return (
     <section className="panel provider-usage">
       <div className="provider-title">
         <div>
           <h2>{usage.display_label}</h2>
           <p className="muted">
-            {snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"} | Source: {snapshot.source}
-            {snapshot.model_name ? ` | Model: ${snapshot.model_name}` : ""}
+            <span className="source-chip"><MiniIcon kind="provider" />{snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"}</span>
+            <span className="source-chip">Source: {snapshot.source}</span>
+            {snapshot.model_name && <span className="source-chip">Model: {snapshot.model_name}</span>}
           </p>
         </div>
-        <button className="section-toggle" onClick={onToggle} type="button">{collapsed ? "Show" : "Hide"}</button>
+        <button className="icon-toggle" onClick={onToggle} type="button" title={collapsed ? "Show provider details" : "Hide provider details"} aria-label={collapsed ? "Show provider details" : "Hide provider details"}>
+          <ChevronIcon expanded={!collapsed} />
+        </button>
         {snapshot.error_state && <span className="error">{snapshot.error_state}</span>}
       </div>
       {!collapsed && (
         <>
       {snapshot.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
       <div className="grid two">
-        <MetricCard title="Session" value={limitValue(snapshot.session_usage_percent)} sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)} />
-        <MetricCard title="Weekly" value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
+        <MetricCard title="Session" trend={trends?.session} value={limitValue(snapshot.session_usage_percent)} sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)} />
+        <MetricCard title="Weekly" trend={trends?.weekly} value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
       </div>
-      <div className="grid two">
-        <div>
-          <strong>Session forecast</strong>
-          <p>{duration(usage.burn.session.minutes_until_limit, usage.burn.session.reason)}</p>
-          <small>{fmt(usage.burn.session.rate_per_hour)} tokens/hr | {pct(usage.burn.session.pct_per_hour)}/hr</small>
-        </div>
-        <div>
-          <strong>Weekly forecast</strong>
-          <p>{duration(usage.burn.week.minutes_until_limit, usage.burn.week.reason)}</p>
-          <small>{fmt(usage.burn.week.rate_per_hour)} tokens/hr | {pct(usage.burn.week.pct_per_hour)}/hr</small>
-        </div>
-      </div>
-      <div className="grid two">
-        <TotalsCard title={`${usage.display_label} Session`} totals={session} />
-        <TotalsCard title={`${usage.display_label} Week`} totals={week} />
-      </div>
+      <ForecastSection usage={usage} />
+      {usage.provider_id === "claude_code" && (
+        <section className="subsection calibration">
+          <div className="section-row">
+            <h3><MiniIcon kind="gauge" />Session Calibration</h3>
+          </div>
+          <div className="calibration-row">
+            <label>Known current session %<input type="number" min={0.1} max={99.9} step={0.1} value={calibrationPercent} onChange={(e) => setCalibrationPercent(e.target.value)} /></label>
+            <button
+              disabled={saving || !Number.isFinite(Number(calibrationPercent))}
+              onClick={() => onCalibrate(Number(calibrationPercent))}
+              type="button"
+            >
+              Calibrate
+            </button>
+          </div>
+          <p className="muted">
+            {knownCalibration
+              ? `Calibrated at ${knownCalibration.toFixed(1)}% with ${fmt(calibration.claude_session_calibration_tokens)} session tokens.`
+              : "Use this when the Claude usage page gives you a trusted current session percentage."}
+          </p>
+        </section>
+      )}
+      <TotalsSection usage={usage} session={session} week={week} />
       <ProviderTimeline usage={usage} />
         </>
+      )}
+    </section>
+  );
+}
+
+function ForecastSection({ usage }: { usage: ProviderUsage }) {
+  const [collapsed, setCollapsed] = useState(true);
+  return (
+    <section className="subsection">
+      <div className="section-row">
+        <h3><MiniIcon kind="bolt" />Forecasts</h3>
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show forecasts" : "Hide forecasts"} aria-label={collapsed ? "Show forecasts" : "Hide forecasts"}>
+          <ChevronIcon expanded={!collapsed} />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="grid two dense">
+          <ForecastCard
+            title="Session"
+            minutes={usage.burn.session.minutes_until_limit}
+            reason={usage.burn.session.reason}
+            rate={usage.burn.session.rate_per_hour}
+            percentRate={usage.burn.session.pct_per_hour}
+          />
+          <ForecastCard
+            title="Weekly"
+            minutes={usage.burn.week.minutes_until_limit}
+            reason={usage.burn.week.reason}
+            rate={usage.burn.week.rate_per_hour}
+            percentRate={usage.burn.week.pct_per_hour}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ForecastCard({ title, minutes, reason, rate, percentRate }: { title: string; minutes: number | null; reason?: string | null; rate: number | null; percentRate: number | null }) {
+  return (
+    <div className="forecast-card">
+      <strong><MiniIcon kind="bolt" />{title}</strong>
+      <p><span className="value-chip">{duration(minutes, reason)}</span></p>
+      <div className="chip-row">
+        <StatChip icon="tokens" label="Velocity" value={`${fmt(rate)} / hr`} />
+        <StatChip icon="gauge" label="Change" value={`${pct(percentRate)} / hr`} />
+      </div>
+    </div>
+  );
+}
+
+function TotalsSection({ usage, session, week }: { usage: ProviderUsage; session: UsageTotals; week: UsageTotals }) {
+  const [collapsed, setCollapsed] = useState(true);
+  return (
+    <section className="subsection">
+      <div className="section-row">
+        <h3><MiniIcon kind="tokens" />Token totals</h3>
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show token totals" : "Hide token totals"} aria-label={collapsed ? "Show token totals" : "Hide token totals"}>
+          <ChevronIcon expanded={!collapsed} />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="grid two dense">
+          <TotalsCard title={`${usage.display_label} Session`} totals={session} />
+          <TotalsCard title={`${usage.display_label} Week`} totals={week} />
+        </div>
       )}
     </section>
   );
@@ -420,8 +619,8 @@ function ProviderTimeline({ usage }: { usage: ProviderUsage }) {
     <section className="timeline">
       <div className="timeline-head">
         <h3>{usage.display_label} Session Timeline</h3>
-        <button className="section-toggle" onClick={() => setCollapsed((value) => !value)} type="button">
-          {collapsed ? "Show table" : "Hide table"}
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show timeline table" : "Hide timeline table"} aria-label={collapsed ? "Show timeline table" : "Hide timeline table"}>
+          <ChevronIcon expanded={!collapsed} />
         </button>
       </div>
       {!collapsed && (

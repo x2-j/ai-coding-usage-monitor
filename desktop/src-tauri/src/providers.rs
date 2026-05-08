@@ -13,6 +13,7 @@ const CLAUDE_ID: &str = "claude_code";
 const CODEX_ID: &str = "openai_codex_cli";
 const CODEX_SESSION_FALLBACK_BUDGET_TOKENS: i64 = 350_000_000;
 const CODEX_WEEKLY_FALLBACK_BUDGET_TOKENS: i64 = 3_500_000_000;
+const STATUSLINE_STALE_AFTER_MINUTES: i64 = 15;
 
 pub struct ProviderResult {
     pub snapshot: UsageSnapshot,
@@ -110,11 +111,19 @@ pub fn collect_claude(settings: &AppSettings, data_dir: &Path) -> ProviderResult
     let totals = scan_claude_logs(settings);
     let statusline = data_dir.join("statusline_latest.json");
     let mut snapshot = if statusline.exists() {
-        fs::read_to_string(&statusline)
+        match fs::read_to_string(&statusline)
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .map(|value| snapshot_from_statusline(&value))
-            .unwrap_or_else(|| UsageSnapshot::error(CLAUDE_ID, "Anthropic", "Could not parse statusline data.".to_string()))
+        {
+            Some(value) => {
+                let mut snapshot = snapshot_from_statusline(&value);
+                if statusline_is_stale(&value, &statusline) {
+                    mark_stale_statusline_for_local_estimates(&mut snapshot);
+                }
+                snapshot
+            }
+            None => UsageSnapshot::error(CLAUDE_ID, "Anthropic", "Could not parse statusline data.".to_string()),
+        }
     } else {
         UsageSnapshot::error(CLAUDE_ID, "Anthropic", "No Claude Code statusline data yet; using local estimates.".to_string())
     };
@@ -142,7 +151,8 @@ fn apply_token_totals(
     let weekly_tokens = if settings.include_cache_tokens { week.total_tokens } else { week.visible_tokens };
     let mut estimated_any = false;
     if estimate_percentages && snapshot.session_usage_percent.is_none() {
-        snapshot.session_usage_percent = percentage(session_tokens, settings.session_budget_tokens);
+        snapshot.session_usage_percent = calibrated_session_percentage(&snapshot.provider_id, session_tokens, settings)
+            .or_else(|| percentage(session_tokens, settings.session_budget_tokens));
         snapshot.is_estimate = true;
         estimated_any = snapshot.session_usage_percent.is_some();
     }
@@ -159,10 +169,24 @@ fn apply_token_totals(
     snapshot.cache_read_tokens = session.cache_read_tokens;
     snapshot.cache_write_tokens = session.cache_write_tokens;
     snapshot.total_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
-    if snapshot.error_state.is_some() && snapshot.total_tokens > 0 && estimated_any {
+    if snapshot.error_state.is_some() && snapshot.total_tokens > 0 && estimated_any && !is_stale_statusline_source(&snapshot.source) {
         snapshot.error_state = None;
         snapshot.source = "local token budget estimate".to_string();
     }
+}
+
+fn calibrated_session_percentage(provider_id: &str, session_tokens: i64, settings: &AppSettings) -> Option<f64> {
+    if provider_id != CLAUDE_ID {
+        return None;
+    }
+    let calibration_percent = settings.claude_session_calibration_percent?;
+    let calibration_tokens = settings.claude_session_calibration_tokens?;
+    let budget_tokens = settings.claude_session_calibration_budget_tokens?;
+    if !(0.0..100.0).contains(&calibration_percent) || budget_tokens <= 0 || session_tokens < calibration_tokens {
+        return None;
+    }
+    let delta_tokens = session_tokens - calibration_tokens;
+    Some((calibration_percent + ((delta_tokens as f64 / budget_tokens as f64) * 100.0)).clamp(0.0, 100.0))
 }
 
 fn percentage(tokens: i64, budget: i64) -> Option<f64> {
@@ -208,7 +232,9 @@ fn snapshot_from_statusline(value: &Value) -> UsageSnapshot {
         provider_id: CLAUDE_ID.to_string(),
         provider_name: find_first_string(data, &["provider", "provider_name", "providerName"]).unwrap_or_else(|| "Anthropic".to_string()),
         source: "Claude Code statusline".to_string(),
-        timestamp_utc: parse_time(find_first_value(data, &["timestamp", "created_at", "createdAt", "time"])).unwrap_or_else(|| Utc::now().to_rfc3339()),
+        timestamp_utc: parse_time(find_first_value(data, &["timestamp", "created_at", "createdAt", "time"]))
+            .or_else(|| parse_time(data.get("captured_at")))
+            .unwrap_or_else(|| Utc::now().to_rfc3339()),
         model_name: find_first_string(data, &["model", "model_name", "modelName"]),
         input_tokens: input,
         output_tokens: output,
@@ -223,6 +249,35 @@ fn snapshot_from_statusline(value: &Value) -> UsageSnapshot {
         is_estimate: false,
         error_state: None,
     }
+}
+
+fn statusline_is_stale(value: &Value, path: &Path) -> bool {
+    let capture_time = statusline_capture_time(value, path);
+    capture_time.is_some_and(|time| Utc::now() - time > Duration::minutes(STATUSLINE_STALE_AFTER_MINUTES))
+}
+
+fn statusline_capture_time(value: &Value, path: &Path) -> Option<DateTime<Utc>> {
+    let data = value.get("raw").unwrap_or(value);
+    parse_datetime(data.get("captured_at")).or_else(|| {
+        fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(DateTime::<Utc>::from)
+    })
+}
+
+fn mark_stale_statusline_for_local_estimates(snapshot: &mut UsageSnapshot) {
+    snapshot.source = "Claude Code local logs (statusline stale)".to_string();
+    snapshot.session_usage_percent = None;
+    snapshot.weekly_usage_percent = None;
+    snapshot.session_reset_at = None;
+    snapshot.weekly_reset_at = None;
+    snapshot.is_estimate = true;
+    snapshot.error_state = Some("Exact Claude statusline data is stale; showing local token-budget estimates from Claude Code logs until Claude Code captures fresh statusline data.".to_string());
+}
+
+fn is_stale_statusline_source(source: &str) -> bool {
+    source.contains("statusline stale")
 }
 
 fn scan_claude_logs(settings: &AppSettings) -> BTreeMap<String, UsageTotals> {
@@ -396,8 +451,10 @@ fn find_codex_command() -> Option<PathBuf> {
 
 fn find_usage_dict(value: &Value) -> Option<&Value> {
     if let Value::Object(map) = value {
-        if map.get("usage").is_some_and(Value::is_object) {
-            return map.get("usage");
+        for key in ["usage", "current_usage"] {
+            if map.get(key).is_some_and(Value::is_object) {
+                return map.get(key);
+            }
         }
         for child in map.values() {
             if let Some(found) = find_usage_dict(child) {
@@ -417,7 +474,7 @@ fn find_usage_dict(value: &Value) -> Option<&Value> {
 fn iter_usage_dicts(value: &Value) -> Vec<&Value> {
     let mut out = Vec::new();
     if let Value::Object(map) = value {
-        for key in ["last_token_usage", "usage", "token_usage", "total_token_usage"] {
+        for key in ["last_token_usage", "usage", "current_usage", "token_usage", "total_token_usage"] {
             if map.get(key).is_some_and(Value::is_object) {
                 out.push(map.get(key).unwrap());
             }
@@ -473,21 +530,29 @@ fn normalize_pct(value: Option<&Value>) -> Option<f64> {
 }
 
 fn parse_time(value: Option<&Value>) -> Option<String> {
+    parse_datetime(value).map(|dt| dt.to_rfc3339())
+}
+
+fn parse_datetime(value: Option<&Value>) -> Option<DateTime<Utc>> {
     match value? {
         Value::String(text) if text.chars().all(|c| c.is_ascii_digit()) => {
-            text.parse::<i64>().ok().map(timestamp_from_epoch)
+            text.parse::<i64>().ok().and_then(datetime_from_epoch)
         }
-        Value::String(text) => DateTime::parse_from_rfc3339(&text.replace('Z', "+00:00")).ok().map(|dt| dt.with_timezone(&Utc).to_rfc3339()),
-        Value::Number(n) => n.as_i64().map(timestamp_from_epoch),
+        Value::String(text) => DateTime::parse_from_rfc3339(&text.replace('Z', "+00:00")).ok().map(|dt| dt.with_timezone(&Utc)),
+        Value::Number(n) => n.as_i64().and_then(datetime_from_epoch),
         _ => None,
     }
 }
 
-fn timestamp_from_epoch(mut value: i64) -> String {
+fn timestamp_from_epoch(value: i64) -> String {
+    datetime_from_epoch(value).unwrap_or_else(Utc::now).to_rfc3339()
+}
+
+fn datetime_from_epoch(mut value: i64) -> Option<DateTime<Utc>> {
     if value > 10_000_000_000 {
         value /= 1000;
     }
-    Utc.timestamp_opt(value, 0).single().unwrap_or_else(Utc::now).to_rfc3339()
+    Utc.timestamp_opt(value, 0).single()
 }
 
 fn path_hash(path: &Path) -> u64 {
@@ -555,5 +620,105 @@ mod tests {
 
         assert_eq!(snapshot.session_usage_percent, Some(25.0));
         assert_eq!(snapshot.weekly_usage_percent, Some(25.0));
+    }
+
+    #[test]
+    fn claude_statusline_reads_context_window_current_usage() {
+        let value = serde_json::json!({
+            "model": { "id": "claude-sonnet-4-5", "display_name": "Sonnet" },
+            "context_window": {
+                "current_usage": {
+                    "input_tokens": 8500,
+                    "output_tokens": 1200,
+                    "cache_creation_input_tokens": 5000,
+                    "cache_read_input_tokens": 2000
+                }
+            },
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": 23.5,
+                    "resets_at": 1738425600
+                },
+                "seven_day": {
+                    "used_percentage": 41.2,
+                    "resets_at": 1738857600
+                }
+            }
+        });
+
+        let snapshot = snapshot_from_statusline(&value);
+
+        assert_eq!(snapshot.input_tokens, 8500);
+        assert_eq!(snapshot.output_tokens, 1200);
+        assert_eq!(snapshot.cache_write_tokens, 5000);
+        assert_eq!(snapshot.cache_read_tokens, 2000);
+        assert_eq!(snapshot.session_usage_percent, Some(23.5));
+        assert_eq!(snapshot.weekly_usage_percent, Some(41.2));
+    }
+
+    #[test]
+    fn stale_statusline_uses_captured_at() {
+        let value = serde_json::json!({
+            "captured_at": "2020-01-01T00:00:00Z",
+            "rate_limits": {
+                "five_hour": { "used_percentage": 12.0 },
+                "seven_day": { "used_percentage": 34.0 }
+            }
+        });
+
+        assert!(statusline_is_stale(&value, Path::new("missing-statusline-file.json")));
+    }
+
+    #[test]
+    fn stale_statusline_percentages_do_not_override_local_estimates() {
+        let mut settings = default_settings();
+        settings.session_budget_tokens = 1_000;
+        settings.weekly_budget_tokens = 2_000;
+        let mut totals = empty_totals_map();
+        totals.get_mut("session").unwrap().input_tokens = 250;
+        totals.get_mut("session").unwrap().visible_tokens = 250;
+        totals.get_mut("session").unwrap().total_tokens = 250;
+        totals.get_mut("week").unwrap().input_tokens = 500;
+        totals.get_mut("week").unwrap().visible_tokens = 500;
+        totals.get_mut("week").unwrap().total_tokens = 500;
+        let mut snapshot = UsageSnapshot {
+            provider_id: CLAUDE_ID.to_string(),
+            provider_name: "Anthropic".to_string(),
+            source: "Claude Code statusline".to_string(),
+            timestamp_utc: Utc::now().to_rfc3339(),
+            model_name: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 0,
+            session_usage_percent: Some(99.0),
+            weekly_usage_percent: Some(88.0),
+            session_reset_at: Some(Utc::now().to_rfc3339()),
+            weekly_reset_at: Some(Utc::now().to_rfc3339()),
+            raw_limit_name: None,
+            is_estimate: false,
+            error_state: None,
+        };
+
+        mark_stale_statusline_for_local_estimates(&mut snapshot);
+        apply_token_totals(&mut snapshot, &totals, &settings, true);
+
+        assert_eq!(snapshot.session_usage_percent, Some(25.0));
+        assert_eq!(snapshot.weekly_usage_percent, Some(25.0));
+        assert!(snapshot.error_state.is_some());
+        assert_eq!(snapshot.source, "Claude Code local logs (statusline stale)");
+    }
+
+    #[test]
+    fn calibrated_session_percentage_tracks_token_delta() {
+        let mut settings = default_settings();
+        settings.claude_session_calibration_percent = Some(40.0);
+        settings.claude_session_calibration_tokens = Some(400);
+        settings.claude_session_calibration_budget_tokens = Some(1_000);
+
+        assert_eq!(calibrated_session_percentage(CLAUDE_ID, 650, &settings), Some(65.0));
+        assert_eq!(calibrated_session_percentage(CLAUDE_ID, 399, &settings), None);
+        assert_eq!(calibrated_session_percentage(CODEX_ID, 650, &settings), None);
     }
 }

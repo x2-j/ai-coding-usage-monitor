@@ -79,6 +79,10 @@ export interface AppSettings {
   session_critical_threshold: number;
   weekly_warning_threshold: number;
   weekly_critical_threshold: number;
+  claude_session_calibration_percent: number | null;
+  claude_session_calibration_tokens: number | null;
+  claude_session_calibration_budget_tokens: number | null;
+  claude_session_calibration_at: string | null;
 }
 
 export interface ChartPoint {

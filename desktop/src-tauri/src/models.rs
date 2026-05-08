@@ -152,6 +152,10 @@ pub struct AppSettings {
     pub session_critical_threshold: f64,
     pub weekly_warning_threshold: f64,
     pub weekly_critical_threshold: f64,
+    pub claude_session_calibration_percent: Option<f64>,
+    pub claude_session_calibration_tokens: Option<i64>,
+    pub claude_session_calibration_budget_tokens: Option<i64>,
+    pub claude_session_calibration_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

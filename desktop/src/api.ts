@@ -26,5 +26,6 @@ export const refreshUsage = () => callBackend<MonitorState>("refresh_usage");
 export const getSettings = () => callBackend<AppSettings>("get_settings");
 export const saveSettings = (settings: AppSettings) => callBackend<MonitorState>("save_settings", { settings });
 export const enableCodexTracking = () => callBackend<MonitorState>("enable_codex_tracking");
+export const calibrateClaudeSession = (percent: number) => callBackend<MonitorState>("calibrate_claude_session", { percent });
 export const setupStatusline = () => callBackend<string>("setup_statusline");
 export const openUsagePage = () => callBackend<void>("open_usage_page");

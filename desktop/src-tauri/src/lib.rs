@@ -12,6 +12,7 @@ use crate::import_legacy::import_legacy_if_needed;
 use crate::models::{AppSettings, BurnRateProjection, MonitorState, ProviderUsage};
 use crate::providers::{collect_provider, provider_availability};
 use crate::storage::Store;
+use chrono::Utc;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -63,20 +64,14 @@ impl AppCore {
             };
             let mut provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
             if force_refresh {
-                if result.snapshot.error_state.is_none()
-                    && (result.snapshot.total_tokens > 0
-                        || result.snapshot.session_usage_percent.is_some()
-                        || result.snapshot.weekly_usage_percent.is_some())
-                {
+                if should_append_snapshot(&result.snapshot) {
                     self.store.append_snapshot(&result.snapshot)?;
                     provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
                 }
             }
             if provider_history.is_empty() {
                 let snapshot = &result.snapshot;
-                if snapshot.error_state.is_none()
-                    && (snapshot.total_tokens > 0 || snapshot.session_usage_percent.is_some() || snapshot.weekly_usage_percent.is_some())
-                {
+                if should_append_snapshot(snapshot) {
                     self.store.append_snapshot(snapshot)?;
                     provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
                 }
@@ -146,6 +141,16 @@ impl AppCore {
     }
 }
 
+fn should_append_snapshot(snapshot: &crate::models::UsageSnapshot) -> bool {
+    let has_usage = snapshot.total_tokens > 0
+        || snapshot.session_usage_percent.is_some()
+        || snapshot.weekly_usage_percent.is_some();
+    if !has_usage {
+        return false;
+    }
+    snapshot.error_state.is_none() || snapshot.source.contains("statusline stale")
+}
+
 #[tauri::command]
 fn get_monitor_state(core: State<'_, Mutex<AppCore>>) -> Result<MonitorState, String> {
     core.lock().map_err(|_| "App state lock failed.".to_string())?.monitor_state(false)
@@ -174,6 +179,33 @@ fn enable_codex_tracking(core: State<'_, Mutex<AppCore>>) -> Result<MonitorState
     let mut settings = core.settings()?;
     settings.codex_tracking_enabled = true;
     settings.selected_provider_id = "openai_codex_cli".to_string();
+    core.save_settings(settings)?;
+    core.monitor_state(true)
+}
+
+#[tauri::command]
+fn calibrate_claude_session(core: State<'_, Mutex<AppCore>>, percent: f64) -> Result<MonitorState, String> {
+    if !percent.is_finite() || percent <= 0.0 || percent >= 100.0 {
+        return Err("Session calibration must be greater than 0 and less than 100.".to_string());
+    }
+    let core = core.lock().map_err(|_| "App state lock failed.".to_string())?;
+    let mut settings = core.settings()?;
+    let result = collect_provider("claude_code", &settings, &core.data_dir)
+        .ok_or_else(|| "Claude Code provider is unavailable.".to_string())?;
+    let session = result
+        .totals
+        .get("session")
+        .cloned()
+        .unwrap_or_else(crate::models::UsageTotals::empty);
+    let session_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
+    if session_tokens <= 0 {
+        return Err("No local Claude session token total is available to calibrate from yet.".to_string());
+    }
+    let budget_tokens = ((session_tokens as f64) / (percent / 100.0)).round() as i64;
+    settings.claude_session_calibration_percent = Some(percent);
+    settings.claude_session_calibration_tokens = Some(session_tokens);
+    settings.claude_session_calibration_budget_tokens = Some(budget_tokens.max(session_tokens + 1));
+    settings.claude_session_calibration_at = Some(Utc::now().to_rfc3339());
     core.save_settings(settings)?;
     core.monitor_state(true)
 }
@@ -244,6 +276,7 @@ pub fn run() {
             get_settings,
             save_settings,
             enable_codex_tracking,
+            calibrate_claude_session,
             setup_statusline,
             open_usage_page
         ])

@@ -104,6 +104,8 @@ test-results/
 # Windows Native / WinUI / MSIX
 # ---------------------------------------------------------
 bin/
+!desktop/src-tauri/src/bin/
+!desktop/src-tauri/src/bin/**
 obj/
 x64/
 x86/

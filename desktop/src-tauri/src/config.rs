@@ -38,6 +38,10 @@ pub fn default_settings() -> AppSettings {
         session_critical_threshold: 95.0,
         weekly_warning_threshold: 80.0,
         weekly_critical_threshold: 95.0,
+        claude_session_calibration_percent: None,
+        claude_session_calibration_tokens: None,
+        claude_session_calibration_budget_tokens: None,
+        claude_session_calibration_at: None,
     }
 }
 
@@ -57,6 +61,15 @@ pub fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
         settings.theme_mode = "system".to_string();
     }
     settings.history_retention_days = settings.history_retention_days.max(1);
+    settings.claude_session_calibration_percent = settings
+        .claude_session_calibration_percent
+        .filter(|value| value.is_finite() && *value > 0.0 && *value < 100.0);
+    settings.claude_session_calibration_tokens = settings
+        .claude_session_calibration_tokens
+        .filter(|value| *value >= 0);
+    settings.claude_session_calibration_budget_tokens = settings
+        .claude_session_calibration_budget_tokens
+        .filter(|value| *value > 0);
     settings
 }
 

@@ -34,6 +34,7 @@ DEBUG_LOG = CONFIG_DIR / "debug.log"
 DEFAULT_CLAUDE_LOG_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 USAGE_HISTORY_SCHEMA_VERSION = 1
+STATUSLINE_STALE_AFTER_MINUTES = 15
 WIDGET_DISPLAY_MODES = ("full", "compact", "minimal")
 THEME_MODES = ("system", "dark", "light")
 THEMES = {
@@ -250,7 +251,8 @@ def find_first_key(obj: Any, names: Tuple[str, ...]) -> Any:
 
 def find_usage_dict(obj: Any) -> Optional[Dict[str, Any]]:
     if isinstance(obj, dict):
-        if isinstance(obj.get("usage"), dict): return obj["usage"]
+        for key in ("usage", "current_usage"):
+            if isinstance(obj.get(key), dict): return obj[key]
         for v in obj.values():
             r = find_usage_dict(v)
             if r: return r
@@ -639,6 +641,17 @@ def read_statusline_record() -> UsageRecord:
     record = usage_record_from_statusline(data)
     if record.session_usage_pct is None and record.weekly_usage_pct is None:
         return usage_record_error("Statusline file exists, but it has no recognized rate_limits fields. Fallback local totals are being used.")
+    try:
+        age = datetime.now().astimezone() - datetime.fromtimestamp(STATUSLINE_LATEST.stat().st_mtime).astimezone()
+        if age > timedelta(minutes=STATUSLINE_STALE_AFTER_MINUTES):
+            record.source = "Claude Code local logs (statusline stale)"
+            record.session_usage_pct = None
+            record.weekly_usage_pct = None
+            record.session_reset_time = None
+            record.weekly_reset_time = None
+            record.error = "Exact Claude statusline data is stale; showing local token-budget estimates from Claude Code logs until Claude Code captures fresh statusline data."
+    except Exception as e:
+        log(f"statusline stale check failed: {e!r}")
     return record
 
 def read_statusline_usage() -> RateLimitUsage:
