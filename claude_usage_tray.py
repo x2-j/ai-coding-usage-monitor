@@ -425,6 +425,15 @@ def fmt_duration(v: Optional[timedelta], reason: Optional[str] = None) -> str:
         return f"{d}d {h}h"
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
+def fmt_forecast_duration(v: timedelta, weekly: bool = False) -> str:
+    seconds = max(0, int(v.total_seconds()))
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if weekly:
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+    return f"{hours}h {minutes}m"
+
 def usage_record_error(message: str, source: str = "Claude Code statusline") -> UsageRecord:
     return UsageRecord(provider_name="Anthropic", timestamp=datetime.now().astimezone(), source=source, error=message)
 
@@ -592,13 +601,24 @@ class App:
             f"session limit in {fmt_duration(s.time_until_limit, s.reason)}\n"
             f"Weekly pace: {fmt_rate(w.pct_per_hour, '%/hr')} | weekly limit in {fmt_duration(w.time_until_limit, w.reason)}"
         )
+    def _forecast_lines(self) -> List[str]:
+        s = self.last_burn.get("session", BurnRateProjection())
+        w = self.last_burn.get("week", BurnRateProjection())
+        lines: List[str] = []
+        if s.time_until_limit is not None:
+            lines.append(f"At current usage, session limit in {fmt_forecast_duration(s.time_until_limit)}")
+        if w.time_until_limit is not None:
+            lines.append(f"At current usage, weekly limit in {fmt_forecast_duration(w.time_until_limit, weekly=True)}")
+        return lines or ["Not enough recent data yet"]
+    def _forecast_summary(self) -> str:
+        return "\n".join(self._forecast_lines())
     def _update(self, r, totals, burn):
         self.last_rate, self.last_totals, self.last_burn = r, totals, burn
         sp, wp, sr, wr, src = self._effective()
         if r.error:
-            self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._burn_summary()}")
+            self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._forecast_summary()}")
         else:
-            self.rate_label.set(f"Session / 5-hour limit: {sp:.1f}% used - resets in {sr}\nWeekly / 7-day limit: {wp:.1f}% used - resets in {wr}\n{self._burn_summary()}\nSource: {src}")
+            self.rate_label.set(f"Session / 5-hour limit: {sp:.1f}% used - resets in {sr}\nWeekly / 7-day limit: {wp:.1f}% used - resets in {wr}\n{self._forecast_summary()}\nSource: {src}")
         for k,t in totals.items():
             self.labels[k].set(f"In: {fmt(t.input_tokens)} | Out: {fmt(t.output_tokens)} | Cache: {fmt(t.cache_creation_input_tokens+t.cache_read_input_tokens)} | Requests: {fmt(t.requests)}")
         self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Statusline file: {STATUSLINE_LATEST}")
@@ -643,7 +663,7 @@ class App:
         self.widget_title = tk.Label(text, text="Claude Code", fg="#f4f4f4", bg="#202124", font=("Segoe UI", 10, "bold")); self.widget_title.pack(anchor="w")
         self.widget_updated = tk.Label(text, text="refreshing…", fg="#b8b8b8", bg="#202124", font=("Segoe UI", 8)); self.widget_updated.pack(anchor="w")
         body = tk.Frame(w, bg="#202124"); body.pack(fill="x", pady=(6,0))
-        self.widget_vars = {k: tk.StringVar(value="—") for k in ["session","session_reset","week","week_reset"]}
+        self.widget_vars = {k: tk.StringVar(value="—") for k in ["session","session_reset","week","week_reset","forecast_session","forecast_week"]}
         def row(title, var, reset_var):
             f = tk.Frame(body, bg="#202124"); f.pack(fill="x", pady=2)
             tk.Label(f, text=title, fg="#d6d6d6", bg="#202124", font=("Segoe UI", 8, "bold"), width=8, anchor="w").pack(side="left")
@@ -651,8 +671,11 @@ class App:
             tk.Label(f, textvariable=reset_var, fg="#b8b8b8", bg="#202124", font=("Segoe UI", 8), anchor="w").pack(side="left")
         row("Session", self.widget_vars["session"], self.widget_vars["session_reset"])
         row("Weekly", self.widget_vars["week"], self.widget_vars["week_reset"])
+        forecast = tk.Frame(w, bg="#202124"); forecast.pack(fill="x", pady=(6,0))
+        tk.Label(forecast, textvariable=self.widget_vars["forecast_session"], fg="#f4f4f4", bg="#202124", font=("Segoe UI", 8), anchor="w").pack(anchor="w")
+        tk.Label(forecast, textvariable=self.widget_vars["forecast_week"], fg="#f4f4f4", bg="#202124", font=("Segoe UI", 8), anchor="w").pack(anchor="w")
         w.update_idletasks(); x=14; y=max(0,w.winfo_screenheight()-w.winfo_height()-74); w.geometry(f"+{x}+{y}")
-        for widget in [w, top, text, body, self.logo_canvas]: widget.bind("<Double-Button-1>", lambda e:self.show_window())
+        for widget in [w, top, text, body, forecast, self.logo_canvas]: widget.bind("<Double-Button-1>", lambda e:self.show_window())
         self._update_widget()
     def _update_widget_logo(self, spinning=False):
         if not hasattr(self, "logo_canvas") or not self.logo_canvas.winfo_exists(): return
@@ -666,6 +689,9 @@ class App:
         self.widget_vars["session_reset"].set(f"resets {sr}")
         self.widget_vars["week"].set(f"{wp:.0f}%")
         self.widget_vars["week_reset"].set(f"resets {wr}")
+        lines = self._forecast_lines()
+        self.widget_vars["forecast_session"].set(lines[0])
+        self.widget_vars["forecast_week"].set(lines[1] if len(lines) > 1 else "")
         self.widget_updated.config(text=f"updated {datetime.now().strftime('%H:%M:%S')}")
         self._update_widget_logo()
     def show_window(self): self.close_panel(); self.root.deiconify(); self.root.lift(); self.root.focus_force()
