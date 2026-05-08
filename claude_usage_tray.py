@@ -4,7 +4,7 @@ import json, os, queue, threading, time, math, webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -22,8 +22,10 @@ CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "ClaudeCodeUsag
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "config.json"
 STATUSLINE_LATEST = CONFIG_DIR / "statusline_latest.json"
+USAGE_HISTORY_PATH = CONFIG_DIR / "usage_history.jsonl"
 DEBUG_LOG = CONFIG_DIR / "debug.log"
 DEFAULT_CLAUDE_LOG_DIR = Path.home() / ".claude" / "projects"
+USAGE_HISTORY_SCHEMA_VERSION = 1
 
 DEFAULT_CONFIG = {
     "claude_log_dir": str(DEFAULT_CLAUDE_LOG_DIR),
@@ -103,6 +105,11 @@ def load_config() -> Dict[str, Any]:
 
 def save_config(cfg: Dict[str, Any]) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+def iso_or_none(v: Any) -> Optional[str]:
+    if isinstance(v, datetime): return v.astimezone().isoformat()
+    dt = parse_reset(v)
+    return dt.isoformat() if dt else None
 
 def to_int(v: Any) -> int:
     try: return int(v or 0)
@@ -224,6 +231,70 @@ def countdown(v: Any) -> str:
 
 def fmt(n: int) -> str: return f"{n:,}"
 
+def totals_to_dict(t: UsageTotals) -> Dict[str, int]:
+    return {
+        "input_tokens": t.input_tokens,
+        "output_tokens": t.output_tokens,
+        "cache_creation_input_tokens": t.cache_creation_input_tokens,
+        "cache_read_input_tokens": t.cache_read_input_tokens,
+        "requests": t.requests,
+    }
+
+def history_pct(used: int, budget: Any) -> float:
+    try: return pct(used, int(budget or 0))
+    except Exception: return 0.0
+
+def build_usage_snapshot(record: UsageRecord, totals: Dict[str, UsageTotals], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    session_tokens = totals["session"].total_with_cache if cfg.get("include_cache_tokens") else totals["session"].visible_tokens
+    weekly_tokens = totals["week"].total_with_cache if cfg.get("include_cache_tokens") else totals["week"].visible_tokens
+    session_pct = record.session_usage_pct if record.session_usage_pct is not None else history_pct(session_tokens, cfg.get("session_budget_tokens"))
+    weekly_pct = record.weekly_usage_pct if record.weekly_usage_pct is not None else history_pct(weekly_tokens, cfg.get("weekly_budget_tokens"))
+    source = record.source if not record.error else "local estimate"
+    session_totals = totals["session"]
+    return {
+        "schema_version": USAGE_HISTORY_SCHEMA_VERSION,
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "provider_name": record.provider_name,
+        "model_name": record.model_name,
+        "input_tokens": session_totals.input_tokens,
+        "output_tokens": session_totals.output_tokens,
+        "cache_creation_input_tokens": session_totals.cache_creation_input_tokens,
+        "cache_read_input_tokens": session_totals.cache_read_input_tokens,
+        "session_usage_pct": session_pct,
+        "weekly_usage_pct": weekly_pct,
+        "session_reset_time": iso_or_none(record.session_reset_time),
+        "weekly_reset_time": iso_or_none(record.weekly_reset_time),
+        "source": source,
+        "statusline_error": record.error,
+        "totals": {k: totals_to_dict(v) for k, v in totals.items()},
+    }
+
+def append_usage_snapshot(record: UsageRecord, totals: Dict[str, UsageTotals], cfg: Dict[str, Any]) -> None:
+    try:
+        USAGE_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = build_usage_snapshot(record, totals, cfg)
+        with USAGE_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot, separators=(",", ":")) + "\n")
+    except Exception as e: log(f"usage history append failed: {e!r}")
+
+def query_usage_history(hours: float) -> List[Dict[str, Any]]:
+    if not USAGE_HISTORY_PATH.exists(): return []
+    cutoff = datetime.now().astimezone() - timedelta(hours=hours)
+    rows: List[Dict[str, Any]] = []
+    try:
+        with USAGE_HISTORY_PATH.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try: row = json.loads(line)
+                except Exception: continue
+                ts = parse_reset(row.get("timestamp"))
+                if ts and ts >= cutoff: rows.append(row)
+    except Exception as e: log(f"usage history query failed: {e!r}")
+    return rows
+
+def query_usage_last_5_hours() -> List[Dict[str, Any]]: return query_usage_history(5)
+def query_usage_last_24_hours() -> List[Dict[str, Any]]: return query_usage_history(24)
+def query_usage_last_7_days() -> List[Dict[str, Any]]: return query_usage_history(24 * 7)
+
 def usage_record_error(message: str, source: str = "Claude Code statusline") -> UsageRecord:
     return UsageRecord(provider_name="Anthropic", timestamp=datetime.now().astimezone(), source=source, error=message)
 
@@ -344,8 +415,17 @@ class App:
         else:
             self._update_widget_logo(spinning=False)
     def _scan_thread(self):
-        try: self.q.put((read_statusline_usage(), scan_usage(self.config)))
-        except Exception as e: log(f"refresh failed: {e!r}"); self.q.put((RateLimitUsage(error=str(e)), {k: UsageTotals() for k in ["session","today","week","all"]}))
+        try:
+            record = read_statusline_record()
+            totals = scan_usage(self.config)
+            append_usage_snapshot(record, totals, self.config)
+            self.q.put((RateLimitUsage.from_record(record), totals))
+        except Exception as e:
+            log(f"refresh failed: {e!r}")
+            totals = {k: UsageTotals() for k in ["session","today","week","all"]}
+            record = usage_record_error(str(e))
+            append_usage_snapshot(record, totals, self.config)
+            self.q.put((RateLimitUsage.from_record(record), totals))
     def _poll(self):
         try:
             while True:
