@@ -495,11 +495,12 @@ def make_icon(angle: int = 0, session_pct: float = 0.0):
 
 class App:
     def __init__(self):
-        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("650x560")
+        self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("650x650")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading...")
         self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
         self.last_burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
+        self.last_graph_points: List[Tuple[datetime, float]] = []
         self._refreshing = False; self.icon = None; self.spin_angle = 0
         self._build_ui(); self._start_tray(); self.refresh(); self.root.after(500, self._poll); self.root.after(int(self.config.get("refresh_seconds",10))*1000, self._scheduled)
         if self.config.get("show_desktop_widget", True): self.show_desktop_widget()
@@ -509,6 +510,11 @@ class App:
         ttk.Label(self.root, text="v6 restores the working pystray icon and reads Claude Code statusline data when available. The compact desktop widget is a floating window, not an official Windows Widgets-board app.", wraplength=610).pack(anchor="w", padx=12)
         api = ttk.LabelFrame(self.root, text="Exact Claude Code limits") ; api.pack(fill="x", padx=12, pady=10)
         ttk.Label(api, textvariable=self.rate_label, font=("Segoe UI", 11, "bold"), justify="left").pack(anchor="w", padx=10, pady=8)
+        graph = ttk.LabelFrame(self.root, text="Rolling 5-hour session usage")
+        graph.pack(fill="x", padx=12, pady=4)
+        self.graph_canvas = tk.Canvas(graph, height=120, bg="#202124", highlightthickness=0)
+        self.graph_canvas.pack(fill="x", padx=10, pady=8)
+        self.graph_canvas.bind("<Configure>", lambda e: self._draw_usage_graph())
         loc = ttk.LabelFrame(self.root, text="Local token totals fallback") ; loc.pack(fill="both", expand=True, padx=12, pady=4)
         for k in ["session", "today", "week", "all"]:
             self.labels[k] = tk.StringVar(value="Scanning...")
@@ -561,23 +567,26 @@ class App:
             append_usage_snapshot(record, totals, self.config)
             rate = RateLimitUsage.from_record(record)
             history = query_usage_last_7_days()
+            graph_points = history_points(query_usage_last_5_hours(), lambda row: normalize_pct(row.get("session_usage_pct")))
             burn = self._calculate_burn(rate, history)
-            self.q.put((rate, totals, burn))
+            self.q.put((rate, totals, burn, graph_points))
         except Exception as e:
             log(f"refresh failed: {e!r}")
             totals = {k: UsageTotals() for k in ["session","today","week","all"]}
             record = usage_record_error(str(e))
             append_usage_snapshot(record, totals, self.config)
-            self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="not enough data"), "week": BurnRateProjection(reason="not enough data")}))
+            self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="not enough data"), "week": BurnRateProjection(reason="not enough data")}, []))
     def _poll(self):
         try:
             while True:
                 item = self.q.get_nowait(); self._refreshing=False
                 if len(item) == 2:
-                    r,t = item; burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}
+                    r,t = item; burn = {"session": BurnRateProjection(), "week": BurnRateProjection()}; graph_points = []
+                elif len(item) == 3:
+                    r,t,burn = item; graph_points = []
                 else:
-                    r,t,burn = item
-                self._update(r,t,burn)
+                    r,t,burn,graph_points = item
+                self._update(r,t,burn,graph_points)
         except queue.Empty: pass
         self.root.after(500, self._poll)
     def _scheduled(self):
@@ -612,8 +621,43 @@ class App:
         return lines or ["Not enough recent data yet"]
     def _forecast_summary(self) -> str:
         return "\n".join(self._forecast_lines())
-    def _update(self, r, totals, burn):
-        self.last_rate, self.last_totals, self.last_burn = r, totals, burn
+    def _draw_usage_graph(self):
+        if not hasattr(self, "graph_canvas"): return
+        c = self.graph_canvas
+        width = max(1, c.winfo_width())
+        height = max(1, c.winfo_height())
+        c.delete("all")
+        pad_left, pad_right, pad_top, pad_bottom = 34, 12, 12, 24
+        plot_w = max(1, width - pad_left - pad_right)
+        plot_h = max(1, height - pad_top - pad_bottom)
+        left, top = pad_left, pad_top
+        right, bottom = pad_left + plot_w, pad_top + plot_h
+        c.create_rectangle(left, top, right, bottom, outline="#3a3d42", fill="#202124")
+        for pct_value in (0, 50, 100):
+            y = bottom - (pct_value / 100) * plot_h
+            c.create_line(left, y, right, y, fill="#34373d")
+            c.create_text(8, y, text=f"{pct_value}%", fill="#b8b8b8", anchor="w", font=("Segoe UI", 7))
+        now = datetime.now().astimezone()
+        start = now - timedelta(hours=5)
+        points = [(ts, max(0.0, min(100.0, pct_value))) for ts, pct_value in self.last_graph_points if ts >= start]
+        if len(points) < 2:
+            c.create_text(width / 2, height / 2, text="Not enough recent data yet", fill="#d6d6d6", font=("Segoe UI", 9))
+            return
+        coords: List[Tuple[float, float]] = []
+        window_seconds = max(1, (now - start).total_seconds())
+        for ts, pct_value in points:
+            x = left + ((ts - start).total_seconds() / window_seconds) * plot_w
+            y = bottom - (pct_value / 100) * plot_h
+            coords.append((x, y))
+        for a, b in zip(coords, coords[1:]):
+            c.create_line(a[0], a[1], b[0], b[1], fill="#ffd97a", width=2)
+        current_x, current_y = coords[-1]
+        c.create_oval(current_x - 5, current_y - 5, current_x + 5, current_y + 5, fill="#ffffff", outline="#ffd97a", width=2)
+        c.create_text(left, height - 10, text="-5h", fill="#b8b8b8", anchor="w", font=("Segoe UI", 7))
+        c.create_text(right, height - 10, text="now", fill="#b8b8b8", anchor="e", font=("Segoe UI", 7))
+        c.create_text(max(left, current_x - 4), max(10, current_y - 12), text=f"{points[-1][1]:.1f}%", fill="#ffffff", anchor="e", font=("Segoe UI", 8, "bold"))
+    def _update(self, r, totals, burn, graph_points):
+        self.last_rate, self.last_totals, self.last_burn, self.last_graph_points = r, totals, burn, graph_points
         sp, wp, sr, wr, src = self._effective()
         if r.error:
             self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._forecast_summary()}")
@@ -622,6 +666,7 @@ class App:
         for k,t in totals.items():
             self.labels[k].set(f"In: {fmt(t.input_tokens)} | Out: {fmt(t.output_tokens)} | Cache: {fmt(t.cache_creation_input_tokens+t.cache_read_input_tokens)} | Requests: {fmt(t.requests)}")
         self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | Tray: {'started' if self.icon else 'not available'} | Statusline file: {STATUSLINE_LATEST}")
+        self._draw_usage_graph()
         if self.icon:
             self.icon.title = f"Claude Code Usage\nSession {sp:.1f}% resets {sr}\nWeek {wp:.1f}% resets {wr}"
             self.icon.icon = make_icon(self.spin_angle, sp)
