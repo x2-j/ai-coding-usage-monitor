@@ -39,7 +39,9 @@ This document captures the current v6 architecture before any app rewrite.
 ## Usage data sources
 
 - Provider access now goes through `UsageProviderAdapter` in `claude_usage_tray.py`. Each adapter exposes a provider id/name, display label, local availability check, latest provider-neutral usage snapshot, optional local history import, and current error state.
+- The main UI only shows providers with real local usage data. Installed tools without a safe usage source are treated as unused and hidden from provider usage sections.
 - `ClaudeCodeProviderAdapter` is the first adapter. It wraps the existing Claude Code statusline reader and local JSONL scanner without changing the data source policy or reading credentials.
+- `CodexCliProviderAdapter` is availability-only. It checks for a runnable `codex` CLI and safe `~/.codex/config.toml` presence, but it does not read `auth.json`, session transcripts, history, logs, SQLite rows, prompts, responses, project paths, or credential material.
 - Preferred source: `read_statusline_usage()` reads `statusline_latest.json`, unwraps the `raw` object if present, and looks for `rate_limits`/`rate_limit` with `five_hour`/`session` and `seven_day`/`weekly` fields.
 - The statusline reader accepts `used_percentage` or `utilization`, accepts `resets_at` or `reset_at`, and normalizes fractional utilization values from 0..1 to 0..100.
 - Fallback source: `scan_usage()` recursively scans `*.jsonl` files under the configured Claude projects log directory, finds nested `usage` dictionaries, extracts token counts, deduplicates records by request/message/id fields when available, and buckets totals into session, today, week, and all-time windows.

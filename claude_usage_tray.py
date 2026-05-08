@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil, subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
@@ -26,6 +27,7 @@ STATUSLINE_LATEST = CONFIG_DIR / "statusline_latest.json"
 USAGE_HISTORY_PATH = CONFIG_DIR / "usage_history.jsonl"
 DEBUG_LOG = CONFIG_DIR / "debug.log"
 DEFAULT_CLAUDE_LOG_DIR = Path.home() / ".claude" / "projects"
+DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 USAGE_HISTORY_SCHEMA_VERSION = 1
 
 DEFAULT_CONFIG = {
@@ -95,6 +97,7 @@ class ProviderAvailability:
     available: bool
     source: str
     message: Optional[str] = None
+    has_data: bool = False
 
 @dataclass
 class ProviderUsageSnapshot:
@@ -105,6 +108,7 @@ class UsageProviderAdapter(ABC):
     provider_id: str
     provider_name: str
     display_label: str
+    availability_only = False
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
@@ -561,6 +565,18 @@ def read_statusline_record() -> UsageRecord:
 def read_statusline_usage() -> RateLimitUsage:
     return RateLimitUsage.from_record(read_statusline_record())
 
+def has_jsonl_files(root: Path) -> bool:
+    if not root.exists():
+        return False
+    try:
+        next(root.rglob("*.jsonl"))
+        return True
+    except StopIteration:
+        return False
+    except Exception as e:
+        log(f"provider data probe failed for {root.name}: {e!r}")
+        return False
+
 class ClaudeCodeProviderAdapter(UsageProviderAdapter):
     provider_id = "claude_code"
     provider_name = "Anthropic"
@@ -570,10 +586,10 @@ class ClaudeCodeProviderAdapter(UsageProviderAdapter):
         statusline_exists = STATUSLINE_LATEST.exists()
         log_root = Path(self.cfg.get("claude_log_dir") or DEFAULT_CLAUDE_LOG_DIR).expanduser()
         if statusline_exists:
-            return ProviderAvailability(True, "Claude Code statusline", "Statusline capture file is available.")
-        if log_root.exists():
-            return ProviderAvailability(True, "Claude Code local logs", "Local Claude Code logs are available for estimates.")
-        return ProviderAvailability(False, "Claude Code", "No statusline capture or local Claude Code log folder found.")
+            return ProviderAvailability(True, "Claude Code statusline", "Statusline capture file is available.", True)
+        if has_jsonl_files(log_root):
+            return ProviderAvailability(True, "Claude Code local logs", "Local Claude Code logs are available for estimates.", True)
+        return ProviderAvailability(False, "Claude Code", "No Claude Code usage data found.", False)
 
     def latest_usage_snapshot(self) -> UsageRecord:
         record = read_statusline_record()
@@ -582,6 +598,74 @@ class ClaudeCodeProviderAdapter(UsageProviderAdapter):
 
     def import_history(self) -> Dict[str, UsageTotals]:
         return scan_usage(self.cfg)
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(DEFAULT_CODEX_HOME))).expanduser()
+
+def find_codex_command() -> Optional[str]:
+    # Prefer Windows cmd/exe shims so PowerShell execution policy does not block availability checks.
+    for name in ("codex.cmd", "codex.exe", "codex"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+class CodexCliProviderAdapter(UsageProviderAdapter):
+    provider_id = "openai_codex_cli"
+    provider_name = "OpenAI"
+    display_label = "OpenAI Codex CLI"
+    availability_only = True
+
+    def __init__(self, cfg: Dict[str, Any]):
+        super().__init__(cfg)
+        self.last_version: Optional[str] = None
+
+    def check_availability(self) -> ProviderAvailability:
+        cmd = find_codex_command()
+        home = codex_home()
+        config_path = home / "config.toml"
+        if not cmd:
+            self.error_state = "Codex CLI is not on PATH."
+            return ProviderAvailability(False, "Codex CLI", self.error_state, False)
+        try:
+            result = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=5, check=False)
+        except Exception as e:
+            self.error_state = f"Codex CLI version check failed: {e}"
+            return ProviderAvailability(False, "Codex CLI", self.error_state, False)
+        version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else "unknown version"
+        self.last_version = version
+        if result.returncode != 0:
+            self.error_state = f"Codex CLI version check exited with {result.returncode}."
+            return ProviderAvailability(False, "Codex CLI", self.error_state, False)
+        config_note = "config present" if config_path.exists() else "config not found"
+        self.error_state = None
+        return ProviderAvailability(True, "Codex CLI", f"{version}; {config_note}; usage unavailable without opt-in instrumentation.", False)
+
+    def latest_usage_snapshot(self) -> UsageRecord:
+        availability = self.check_availability()
+        message = "Codex CLI usage tracking is availability-only. Exact local usage is not exposed by a safe supported local source yet."
+        if not availability.available and availability.message:
+            message = availability.message
+        self.error_state = message
+        return UsageRecord(
+            provider_name=self.provider_name,
+            timestamp=datetime.now().astimezone(),
+            source="Codex CLI availability",
+            error=message,
+        )
+
+def available_provider_adapters(cfg: Dict[str, Any]) -> Dict[str, UsageProviderAdapter]:
+    return {
+        ClaudeCodeProviderAdapter.provider_id: ClaudeCodeProviderAdapter(cfg),
+        CodexCliProviderAdapter.provider_id: CodexCliProviderAdapter(cfg),
+    }
+
+def visible_provider_adapters(providers: Dict[str, UsageProviderAdapter]) -> Dict[str, UsageProviderAdapter]:
+    return {
+        provider_id: provider
+        for provider_id, provider in providers.items()
+        if not provider.availability_only and provider.check_availability().has_data
+    }
 
 def make_icon(angle: int = 0, session_pct: float = 0.0):
     if Image is None: return None
@@ -600,7 +684,9 @@ def make_icon(angle: int = 0, session_pct: float = 0.0):
 class App:
     def __init__(self):
         self.config = load_config(); self.q = queue.Queue(); self.root = tk.Tk(); self.root.title(APP_NAME); self.root.geometry("760x860")
-        self.provider: UsageProviderAdapter = ClaudeCodeProviderAdapter(self.config)
+        self.providers = available_provider_adapters(self.config)
+        self.visible_providers = visible_provider_adapters(self.providers)
+        self.provider: Optional[UsageProviderAdapter] = next(iter(self.visible_providers.values()), None)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.labels: Dict[str, tk.StringVar] = {}; self.status = tk.StringVar(); self.rate_label = tk.StringVar(value="Loading...")
         self.panel_window = None; self.widget_window = None; self.panel_vars = {}; self.panel_bars = {}; self.last_rate = RateLimitUsage(); self.last_totals = {k: UsageTotals() for k in ["session","today","week","all"]}
@@ -608,28 +694,29 @@ class App:
         self.last_graph_rows: List[Dict[str, Any]] = []
         self.last_spikes: List[UsageSpike] = []
         self._refreshing = False; self.icon = None; self.spin_angle = 0
-        self._build_ui(); self._start_tray(); self.refresh(); self.root.after(500, self._poll); self.root.after(int(self.config.get("refresh_seconds",10))*1000, self._scheduled)
+        self._build_ui(); self._set_provider_sections_visible(bool(self.provider)); self._start_tray(); self.refresh(); self.root.after(500, self._poll); self.root.after(int(self.config.get("refresh_seconds",10))*1000, self._scheduled)
         if self.config.get("show_desktop_widget", True): self.show_desktop_widget()
         if self.config.get("start_minimized") and self.icon: self.root.withdraw()
     def _build_ui(self):
         ttk.Label(self.root, text="Claude Code Usage", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=12, pady=(12,4))
         ttk.Label(self.root, text="v6 restores the working pystray icon and reads Claude Code statusline data when available. The compact desktop widget is a floating window, not an official Windows Widgets-board app.", wraplength=610).pack(anchor="w", padx=12)
-        api = ttk.LabelFrame(self.root, text="Exact Claude Code limits") ; api.pack(fill="x", padx=12, pady=10)
-        ttk.Label(api, textvariable=self.rate_label, font=("Segoe UI", 11, "bold"), justify="left").pack(anchor="w", padx=10, pady=8)
-        graph = ttk.LabelFrame(self.root, text="Rolling 5-hour graphs")
-        graph.pack(fill="x", padx=12, pady=4)
+        self.no_provider_label = ttk.Label(self.root, text="No provider usage data found yet. Providers without local usage data are hidden.", wraplength=610)
+        self.api_frame = ttk.LabelFrame(self.root, text="Exact Claude Code limits") ; self.api_frame.pack(fill="x", padx=12, pady=10)
+        ttk.Label(self.api_frame, textvariable=self.rate_label, font=("Segoe UI", 11, "bold"), justify="left").pack(anchor="w", padx=10, pady=8)
+        self.graph_frame = ttk.LabelFrame(self.root, text="Rolling 5-hour graphs")
+        self.graph_frame.pack(fill="x", padx=12, pady=4)
         self.graph_canvases: Dict[str, tk.Canvas] = {}
-        graph_grid = ttk.Frame(graph); graph_grid.pack(fill="x", padx=8, pady=8)
+        graph_grid = ttk.Frame(self.graph_frame); graph_grid.pack(fill="x", padx=8, pady=8)
         for idx, key in enumerate(["session", "velocity", "burn", "io"]):
             canvas = tk.Canvas(graph_grid, height=105, bg="#202124", highlightthickness=0)
             canvas.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=4, pady=4)
             canvas.bind("<Configure>", lambda e: self._draw_all_graphs())
             self.graph_canvases[key] = canvas
         graph_grid.columnconfigure(0, weight=1); graph_grid.columnconfigure(1, weight=1)
-        timeline = ttk.LabelFrame(self.root, text="Session Timeline")
-        timeline.pack(fill="x", padx=12, pady=4)
+        self.timeline_frame = ttk.LabelFrame(self.root, text="Session Timeline")
+        self.timeline_frame.pack(fill="x", padx=12, pady=4)
         columns = ("timestamp", "tokens", "split", "pct")
-        self.timeline_tree = ttk.Treeview(timeline, columns=columns, show="headings", height=5)
+        self.timeline_tree = ttk.Treeview(self.timeline_frame, columns=columns, show="headings", height=5)
         self.timeline_tree.heading("timestamp", text="Timestamp")
         self.timeline_tree.heading("tokens", text="Estimated tokens")
         self.timeline_tree.heading("split", text="Input / Output")
@@ -639,11 +726,11 @@ class App:
         self.timeline_tree.column("split", width=160, anchor="e")
         self.timeline_tree.column("pct", width=120, anchor="e")
         self.timeline_tree.pack(fill="x", padx=8, pady=8)
-        loc = ttk.LabelFrame(self.root, text="Local token totals fallback") ; loc.pack(fill="both", expand=True, padx=12, pady=4)
+        self.local_totals_frame = ttk.LabelFrame(self.root, text="Local token totals fallback") ; self.local_totals_frame.pack(fill="both", expand=True, padx=12, pady=4)
         for k in ["session", "today", "week", "all"]:
             self.labels[k] = tk.StringVar(value="Scanning...")
-            ttk.Label(loc, text=k.title(), font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(8,0))
-            ttk.Label(loc, textvariable=self.labels[k]).pack(anchor="w", padx=10)
+            ttk.Label(self.local_totals_frame, text=k.title(), font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(8,0))
+            ttk.Label(self.local_totals_frame, textvariable=self.labels[k]).pack(anchor="w", padx=10)
         ttk.Label(self.root, textvariable=self.status).pack(anchor="w", padx=12, pady=4)
         btn = ttk.Frame(self.root); btn.pack(fill="x", padx=12, pady=10)
         ttk.Button(btn, text="Refresh", command=self.refresh).pack(side="left")
@@ -651,6 +738,20 @@ class App:
         ttk.Button(btn, text="Show Widget", command=self.show_desktop_widget).pack(side="left")
         ttk.Button(btn, text="Open Usage Page", command=lambda:webbrowser.open("https://claude.ai/settings/usage")).pack(side="left", padx=6)
         ttk.Button(btn, text="Open Debug Log", command=lambda: os.startfile(str(DEBUG_LOG)) if DEBUG_LOG.exists() else messagebox.showinfo("Debug log", str(DEBUG_LOG))).pack(side="left", padx=6)
+    def _set_provider_sections_visible(self, visible: bool):
+        frames = [self.api_frame, self.graph_frame, self.timeline_frame, self.local_totals_frame]
+        if visible:
+            if self.no_provider_label.winfo_ismapped():
+                self.no_provider_label.pack_forget()
+            for frame in frames:
+                if not frame.winfo_ismapped():
+                    frame.pack(fill="x" if frame is not self.local_totals_frame else "both", expand=(frame is self.local_totals_frame), padx=12, pady=4)
+        else:
+            for frame in frames:
+                if frame.winfo_ismapped():
+                    frame.pack_forget()
+            if not self.no_provider_label.winfo_ismapped():
+                self.no_provider_label.pack(anchor="w", padx=12, pady=10)
     def _start_tray(self):
         if pystray is None:
             log("pystray/Pillow unavailable; no tray icon")
@@ -686,6 +787,21 @@ class App:
             self._update_widget_logo(spinning=False)
     def _scan_thread(self):
         try:
+            for provider in self.providers.values():
+                provider.cfg = self.config
+            self.visible_providers = visible_provider_adapters(self.providers)
+            self.provider = next(iter(self.visible_providers.values()), None)
+            if self.provider is None:
+                log("no provider usage data found; hiding provider sections")
+                totals = {k: UsageTotals() for k in ["session","today","week","all"]}
+                record = UsageRecord(
+                    provider_name="",
+                    timestamp=datetime.now().astimezone(),
+                    source="no provider data",
+                    error="No provider usage data found.",
+                )
+                self.q.put((RateLimitUsage.from_record(record), totals, {"session": BurnRateProjection(reason="no provider data"), "week": BurnRateProjection(reason="no provider data")}, [], []))
+                return
             self.provider.cfg = self.config
             availability = self.provider.check_availability()
             if not availability.available:
@@ -888,6 +1004,10 @@ class App:
             )
     def _update(self, r, totals, burn, graph_rows, spikes):
         self.last_rate, self.last_totals, self.last_burn, self.last_graph_rows, self.last_spikes = r, totals, burn, graph_rows, spikes
+        self._set_provider_sections_visible(bool(self.provider))
+        if self.provider is None:
+            self.status.set(f"Updated {datetime.now().strftime('%H:%M:%S')} | No provider usage data found")
+            return
         sp, wp, sr, wr, src = self._effective()
         if r.error:
             self.rate_label.set(f"Exact statusline data unavailable\n{r.error}\nFallback: Session {sp:.1f}% | Week {wp:.1f}%\n{self._forecast_summary()}")
