@@ -1,0 +1,3 @@
+display_name: Provider Adapter Expert
+short_description: Implement privacy-safe usage providers for the Tauri/Rust monitor.
+default_prompt: Use this skill to add a new provider adapter to Simple AI Usage Monitor. Read AGENTS.md and PROVIDER_ADAPTERS.md first, preserve the local-first privacy boundary, implement the Rust provider adapter and any required settings/UI, add tests with sanitized fixtures, and report exact vs estimated usage limitations.
