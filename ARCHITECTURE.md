@@ -1,4 +1,4 @@
-# Claude Code Usage Monitor Architecture Notes
+# Simple AI Usage Monitor Architecture Notes
 
 This document captures the current v6 architecture before any app rewrite.
 
@@ -14,8 +14,8 @@ This document captures the current v6 architecture before any app rewrite.
 ## Tray icon implementation
 
 - `claude_usage_tray.py` imports `pystray` and Pillow opportunistically. If either import fails, `pystray`, `Image`, and `ImageDraw` are set to `None`, and the app continues without a tray icon.
-- `make_icon()` draws a generated 64x64 RGBA icon with Pillow: circular background, rotating dot motif, letter `C`, and a bottom usage bar based on session percentage.
-- `App._start_tray()` creates a `pystray.Icon` named `claude_code_usage_tray`, attaches a menu for Usage panel, Open app, Show desktop widget, and Quit, then starts it with `run_detached()`.
+- `make_icon()` draws a generated 64x64 RGBA icon with Pillow: circular background, rotating signal motif, and a bottom usage bar based on session percentage.
+- `App._start_tray()` creates a `pystray.Icon` named `simple_ai_usage_monitor`, attaches a menu for Usage summary, Open app, Show desktop widget, and Quit, then starts it with `run_detached()`.
 - Tray callbacks marshal back to Tk with `root.after(0, ...)`, which avoids directly touching Tk widgets from pystray callback context.
 - During refresh animation and data updates, the tray title and icon are replaced with updated reset text, usage percentage, and spin angle.
 

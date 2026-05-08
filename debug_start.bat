@@ -1,5 +1,5 @@
 @echo off
 cd /d "%~dp0"
-echo Starting Claude Code Usage Tray v6 in debug mode...
+echo Starting Simple AI Usage Monitor in debug mode...
 python claude_usage_tray.py
 pause

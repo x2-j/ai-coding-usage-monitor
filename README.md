@@ -1,6 +1,6 @@
-# Claude Code Usage Tray v6
+# Simple AI Usage Monitor
 
-Lightweight Windows monitor for Claude Code usage.
+Lightweight Windows monitor for local AI coding-agent usage.
 
 ## What v6 changes
 
@@ -9,7 +9,11 @@ Lightweight Windows monitor for Claude Code usage.
 - Removes OAuth/API polling.
 - Adds a small floating desktop widget near the lower-left taskbar area.
 - The floating widget shows Session and Weekly usage/reset countdowns.
-- The widget logo animates briefly whenever data refreshes.
+- Adds floating widget display modes: Full, Compact, and Minimal.
+- Adds dark/light theme support with a Windows-following system option.
+- Adds a subtle purple glow and a non-provider-specific refresh logo.
+- The widget logo animates smoothly and briefly whenever data refreshes.
+- Shows clear loading, paused, and error states.
 - Adds a Session Timeline section that flags large usage spikes from local history.
 - Refresh interval defaults to 10 seconds and is configurable in Settings.
 
@@ -35,4 +39,12 @@ Debug log:
 - Tray icon may be hidden under the `^` hidden-icons menu.
 - Double-click the floating widget to open the main app.
 - The floating widget can be disabled in Settings.
+- Widget display mode can be changed in Settings:
+  - Full: session and weekly details, reset countdowns, and forecast text.
+  - Compact: session and weekly percentages only.
+  - Minimal: one combined status line.
+- Theme can be changed in Settings:
+  - System: follows the Windows app theme when available.
+  - Dark: preserves the original dark widget and graph style.
+  - Light: uses a high-contrast light palette.
 - Session Timeline spike entries are estimates from local snapshots and do not include prompts, responses, file names, or project paths.

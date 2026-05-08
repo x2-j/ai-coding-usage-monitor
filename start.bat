@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-start "Claude Code Usage Tray" pythonw claude_usage_tray.py
+start "Simple AI Usage Monitor" pythonw claude_usage_tray.py
