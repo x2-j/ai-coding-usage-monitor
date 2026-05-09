@@ -311,10 +311,12 @@ h3 { font-size: 12px; color: var(--muted); }
   font-size: 11px;
   white-space: nowrap;
 }
-.stat-chip span, .source-chip span {
+.stat-chip > span:not(.mini-icon),
+.source-chip > span:not(.mini-icon) {
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.2;
 }
 .stat-chip strong {
   color: var(--text);
@@ -322,47 +324,15 @@ h3 { font-size: 12px; color: var(--muted); }
   white-space: nowrap;
 }
 .source-chip {
-  margin: 2px 5px 2px 0;
+  min-height: 28px;
+  margin: 0;
+  padding: 5px 9px;
 }
-[data-tooltip] {
-  position: relative;
+.source-chip .mini-icon {
+  align-self: center;
 }
-[data-tooltip]:hover::after,
-[data-tooltip]:focus-visible::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  z-index: 40;
-  width: max-content;
-  max-width: min(280px, calc(100vw - 32px));
-  transform: translateX(-50%);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 6px;
-  background: #15171d;
-  color: var(--text);
-  padding: 7px 8px;
-  box-shadow: 0 12px 34px rgba(0, 0, 0, .36);
-  line-height: 1.35;
-  white-space: normal;
-  pointer-events: none;
-  font-size: 11px;
-  font-weight: 500;
-}
-[data-tooltip]:hover::before,
-[data-tooltip]:focus-visible::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 3px);
-  z-index: 41;
-  width: 8px;
-  height: 8px;
-  transform: translateX(-50%) rotate(45deg);
-  background: #15171d;
-  border-right: 1px solid rgba(255, 255, 255, 0.16);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
-  pointer-events: none;
+.source-chip .mini-icon.gauge {
+  transform: translateY(1px);
 }
 .forecast-card {
   border: 1px solid var(--border);
@@ -517,13 +487,86 @@ h3 { font-size: 12px; color: var(--muted); }
   display: grid;
   gap: 9px;
 }
+.provider-usage.is-collapsed {
+  gap: 8px;
+}
 .provider-title {
   display: flex;
   justify-content: space-between;
   gap: 10px;
   align-items: flex-start;
 }
-.provider-title p { margin-bottom: 0; }
+.provider-title p {
+  margin-bottom: 0;
+}
+.provider-title .muted {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.mini-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.mini-limit-card {
+  display: grid;
+  grid-template-columns: minmax(74px, .7fr) auto minmax(92px, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid rgba(139, 211, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(139, 211, 255, 0.055);
+  padding: 7px 9px;
+}
+.mini-limit-card > span,
+.mini-limit-card small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  line-height: 1.25;
+}
+.mini-limit-card > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-limit-card strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.mini-limit-card small {
+  justify-self: end;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-limit-card .trend-icon,
+.mini-limit-card .outpacing-icon {
+  width: 19px;
+  height: 19px;
+}
+.mini-limit-card .trend-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.mini-limit-card .outpacing-icon {
+  font-size: 12px;
+}
 .subsection {
   display: grid;
   gap: 8px;
@@ -655,6 +698,8 @@ label {
 label:has(input[type="checkbox"]) {
   display: flex;
   align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 input, select {
   width: 100%;
@@ -663,6 +708,13 @@ input, select {
   background: var(--panel);
   color: var(--text);
   padding: 7px 8px;
+}
+input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
 }
 .widget {
   width: max-content;
@@ -677,6 +729,17 @@ input, select {
   gap: 8px;
   transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
 }
+.widget.full {
+  padding: 14px;
+  gap: 11px;
+  background:
+    linear-gradient(180deg, rgba(172, 132, 255, 0.08), transparent 42%),
+    var(--surface);
+}
+.widget.compact {
+  padding: 7px 8px;
+  gap: 5px;
+}
 .widget-head {
   display: flex;
   align-items: center;
@@ -686,6 +749,14 @@ input, select {
   margin-bottom: 6px;
   cursor: move;
   user-select: none;
+}
+.widget.full .widget-head {
+  margin-bottom: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.widget.compact .widget-head {
+  margin-bottom: 2px;
 }
 .widget-title {
   display: inline-flex;
@@ -701,6 +772,22 @@ input, select {
   border-radius: 50%;
   background: var(--warn);
   box-shadow: 0 0 18px var(--accent);
+}
+.widget.full .logo-dot {
+  width: 16px;
+  height: 16px;
+}
+.widget.compact .logo-dot {
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 12px rgba(172, 132, 255, .55);
+}
+.widget.compact .widget-title {
+  gap: 6px;
+  padding-right: 6px;
+}
+.widget.compact .widget-title strong {
+  font-size: 12px;
 }
 .widget.warning {
   border-color: rgba(255, 178, 56, 0.72);
@@ -746,6 +833,20 @@ input, select {
   padding: 0;
   line-height: 1;
 }
+.widget.compact .widget-mode-tabs {
+  grid-template-columns: repeat(3, 19px);
+  gap: 2px;
+  padding: 1px;
+}
+.widget.compact .widget-mode-tabs button,
+.widget.compact .widget-icon-button {
+  width: 19px;
+  height: 19px;
+}
+.widget.compact .widget-icon-button svg {
+  width: 12px;
+  height: 12px;
+}
 .widget-mode-tabs button {
   border: 0;
   background: transparent;
@@ -783,10 +884,38 @@ input, select {
   padding: 4px 0;
   white-space: nowrap;
 }
+.widget.full .widget-row {
+  grid-template-columns: minmax(76px, 1fr) auto minmax(78px, auto);
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(139, 211, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(139, 211, 255, 0.045);
+}
+.widget.compact .widget-row {
+  grid-template-columns: auto minmax(44px, auto);
+  gap: 6px;
+  padding: 0;
+}
+.widget.compact .widget-row > span {
+  display: none;
+}
+.widget.compact .widget-row em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
 .widget-row strong {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+.widget.full .widget-row strong {
+  font-size: 17px;
+}
+.widget.compact .widget-row strong {
+  font-size: 12px;
+  justify-self: end;
 }
 .widget-row .trend-icon, .widget-row .outpacing-icon {
   width: 20px;
@@ -806,18 +935,52 @@ input, select {
   padding-top: 7px;
   min-width: 0;
 }
+.widget.full .widget-provider {
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  padding: 10px;
+}
+.widget.compact .widget-provider {
+  grid-template-columns: minmax(68px, .8fr) minmax(86px, 1fr) minmax(86px, 1fr);
+  align-items: center;
+  gap: 8px;
+  border-top-color: rgba(255, 255, 255, 0.07);
+  padding-top: 5px;
+}
 .widget-provider > strong {
   white-space: nowrap;
+}
+.widget.full .widget-provider > strong {
+  color: #eef3ff;
+  font-size: 13px;
+}
+.widget.compact .widget-provider > strong {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
 }
 .widget-provider:first-of-type {
   border-top: 0;
   padding-top: 0;
 }
+.widget.full .widget-provider:first-of-type {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  padding-top: 10px;
+}
 .widget-row span, .widget-row em {
   color: var(--muted);
   font-style: normal;
 }
-.widget.compact .widget-head { margin-bottom: 4px; }
+.widget-status {
+  display: block;
+  border-left: 2px solid rgba(172, 132, 255, 0.55);
+  padding-left: 9px;
+  color: var(--muted);
+  line-height: 1.35;
+}
 .widget.minimal {
   display: inline-flex;
   align-items: center;
@@ -851,4 +1014,7 @@ input, select {
   .grid.two, .charts { grid-template-columns: 1fr; }
   .topbar { flex-direction: column; }
   .provider-title { flex-direction: column; }
+}
+@media (max-width: 620px) {
+  .mini-limit-grid { grid-template-columns: 1fr; }
 }

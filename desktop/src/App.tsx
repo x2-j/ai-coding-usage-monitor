@@ -114,10 +114,6 @@ function timeLabel(value: string) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function tooltipText(text: string) {
-  return { title: text, "data-tooltip": text };
-}
-
 function chartValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -169,7 +165,7 @@ function TrendIcon({ trend }: { trend?: UsageTrend }) {
   if (!trend) return null;
   const label = trend.kind === "up" ? "Usage increased on last refresh" : "Usage reset or decreased on last refresh";
   return (
-    <span className={`trend-icon ${trend.kind} ${trend.severity}`} title={label} aria-label={label}>
+    <span className={`trend-icon ${trend.kind} ${trend.severity}`} aria-label={label}>
       {trend.kind === "up" ? <ArrowUpIcon /> : <ResetArrowIcon />}
     </span>
   );
@@ -178,7 +174,7 @@ function TrendIcon({ trend }: { trend?: UsageTrend }) {
 function OutpacingIcon({ active, label }: { active?: boolean; label: string }) {
   if (!active) return null;
   return (
-    <span className="outpacing-icon" title={label} aria-label={label}>
+    <span className="outpacing-icon" aria-label={label}>
       !
     </span>
   );
@@ -337,7 +333,7 @@ function InternalNotificationBar({ notification, onClose }: { notification: Inte
         <strong>{notification.title}</strong>
         <p>{notification.message}</p>
       </div>
-      <button className="notification-close" onClick={onClose} type="button" aria-label="Dismiss notification" title="Dismiss notification">
+      <button className="notification-close" onClick={onClose} type="button" aria-label="Dismiss notification">
         <CloseIcon />
       </button>
     </section>
@@ -358,7 +354,7 @@ function InternalNotificationHost({ notifications, onClose }: { notifications: I
 function ProviderConnectionPill({ state, onClick }: { state: MonitorState; onClick: () => void }) {
   const connectedCount = state.provider_usages.length;
   const label = connectedCount > 0 ? "Connected" : "No Data";
-  const tooltip = connectedCount > 0
+  const statusLabel = connectedCount > 0
     ? `${connectedCount} provider${connectedCount === 1 ? "" : "s"} currently have usable local usage data. Click for provider setup details.`
     : "No providers currently have usable local usage data. Click for setup details.";
 
@@ -367,8 +363,7 @@ function ProviderConnectionPill({ state, onClick }: { state: MonitorState; onCli
       className={`provider-status ${connectedCount > 0 ? "connected" : "no-data"}`}
       onClick={onClick}
       type="button"
-      {...tooltipText(tooltip)}
-      aria-label={tooltip}
+      aria-label={statusLabel}
     >
       <MiniIcon kind="agents" />
       <strong>{connectedCount}</strong>
@@ -392,7 +387,7 @@ function ProviderDetailsModal({ providers, onClose }: { providers: ProviderAvail
             <h2 id="provider-help-title">Provider Setup</h2>
             <p>Each adapter reads local usage data only. No credentials, prompts, responses, or account pages are scanned.</p>
           </div>
-          <button className="notification-close" onClick={onClose} type="button" aria-label="Close provider setup" title="Close provider setup">
+          <button className="notification-close" onClick={onClose} type="button" aria-label="Close provider setup">
             <CloseIcon />
           </button>
         </div>
@@ -404,7 +399,7 @@ function ProviderDetailsModal({ providers, onClose }: { providers: ProviderAvail
               <article className="provider-help-card" key={provider.provider_id}>
                 <div className="provider-help-title">
                   <strong>{provider.display_label}</strong>
-                  <span className={`provider-help-state ${stateClass}`} {...tooltipText(`${provider.display_label}: ${provider.message || provider.source}`)}>
+                  <span className={`provider-help-state ${stateClass}`}>
                     {stateLabel}
                   </span>
                 </div>
@@ -431,6 +426,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<InternalNotification[]>([]);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const stateRef = useRef<MonitorState | null>(null);
+  const seenProviderIds = useRef<Set<string>>(new Set());
   const deliveredNotifications = useRef<Set<string>>(new Set());
 
   function pushNotification(title: string, message: string, stableKey?: string) {
@@ -494,11 +490,26 @@ export default function App() {
     }
   }
 
+  function collapseNewProviders(nextState: MonitorState) {
+    setCollapsedProviders((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const usage of nextState.provider_usages) {
+        if (seenProviderIds.current.has(usage.provider_id)) continue;
+        seenProviderIds.current.add(usage.provider_id);
+        next.add(usage.provider_id);
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }
+
   function applyMonitorState(next: MonitorState) {
     const previous = stateRef.current;
     setTrends(usageTrends(previous, next));
     notifyUsageThresholds(previous, next);
     notifyOutpacingLimits(previous, next);
+    collapseNewProviders(next);
     stateRef.current = next;
     setState(next);
   }
@@ -781,9 +792,9 @@ function WidgetView({
   useLayoutEffect(() => {
     const element = widgetRef.current;
     if (!element) return;
-    const minWidth = mode === "minimal" ? 330 : mode === "compact" ? 360 : 390;
-    const maxWidth = mode === "minimal" ? 720 : 560;
-    const minHeight = mode === "minimal" ? 58 : 92;
+    const minWidth = mode === "minimal" ? 330 : mode === "compact" ? 340 : 420;
+    const maxWidth = mode === "minimal" ? 720 : mode === "compact" ? 520 : 640;
+    const minHeight = mode === "minimal" ? 58 : mode === "compact" ? 74 : 118;
     let frame = 0;
     const resizeToContent = () => {
       frame = window.requestAnimationFrame(() => {
@@ -821,7 +832,7 @@ function WidgetView({
 
   return (
     <main ref={widgetRef} className={`widget ${mode} ${severity}`} onDoubleClick={onOpen}>
-      <div className="widget-head" data-tauri-drag-region onMouseDown={startWindowDrag} title="Drag to move">
+      <div className="widget-head" data-tauri-drag-region onMouseDown={startWindowDrag}>
         <div className="widget-title">
           <span className="logo-dot" />
           <strong>AI Usage</strong>
@@ -834,17 +845,16 @@ function WidgetView({
                 className={option === mode ? "active" : ""}
                 key={option}
                 onClick={() => setWidgetMode(option)}
-                title={`${option[0].toUpperCase()}${option.slice(1)} mode`}
                 type="button"
               >
                 {option === "full" ? "F" : option === "compact" ? "C" : "M"}
               </button>
             ))}
           </div>
-          <button className="widget-icon-button" disabled={refreshing} onClick={refreshWidget} title="Refresh usage" type="button" aria-label="Refresh usage">
+          <button className="widget-icon-button" disabled={refreshing} onClick={refreshWidget} type="button" aria-label="Refresh usage">
             <RefreshIcon />
           </button>
-          <button className="widget-icon-button" onClick={closeWidget} title="Close widget" type="button" aria-label="Close widget">
+          <button className="widget-icon-button" onClick={closeWidget} type="button" aria-label="Close widget">
             <CloseIcon />
           </button>
         </div>
@@ -857,7 +867,7 @@ function WidgetView({
             <WidgetProviderRows key={usage.provider_id} trends={trends[usage.provider_id]} outpacing={outpacing[usage.provider_id]} usage={usage} />
           ))}
           {state.provider_usages.length === 0 && <small>No provider data.</small>}
-          {mode === "full" && <small>{state.status_message}</small>}
+          {mode === "full" && <small className="widget-status">{state.status_message}</small>}
         </>
       )}
     </main>
@@ -889,10 +899,43 @@ function MetricCard({ title, value, sub, trend, outpacing, outpacingLabel }: { t
   );
 }
 
-function StatChip({ label, value, icon, detail }: { label: string; value: string; icon?: "bolt" | "tokens" | "cache" | "requests" | "clock" | "gauge"; detail?: string }) {
-  const tooltip = detail || `${label}: ${value}`;
+function CollapsedProviderSummary({ usage, trends, outpacing }: { usage: ProviderUsage; trends?: UsageTrendMap[string]; outpacing?: LimitOutpacingMap[string] }) {
+  const snapshot = usage.snapshot;
   return (
-    <span className="stat-chip" {...tooltipText(tooltip)}>
+    <div className="mini-limit-grid" aria-label={`${usage.display_label} usage overview`}>
+      <CollapsedLimitCard
+        title="Session"
+        value={limitValue(snapshot.session_usage_percent)}
+        sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)}
+        trend={trends?.session}
+        outpacing={outpacing?.session}
+        outpacingLabel={outpacingLabel(usage.display_label, "session")}
+      />
+      <CollapsedLimitCard
+        title="Weekly"
+        value={limitValue(snapshot.weekly_usage_percent)}
+        sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)}
+        trend={trends?.weekly}
+        outpacing={outpacing?.weekly}
+        outpacingLabel={outpacingLabel(usage.display_label, "weekly")}
+      />
+    </div>
+  );
+}
+
+function CollapsedLimitCard({ title, value, sub, trend, outpacing, outpacingLabel }: { title: string; value: string; sub: string; trend?: UsageTrend; outpacing?: boolean; outpacingLabel: string }) {
+  return (
+    <article className="mini-limit-card">
+      <span><MiniIcon kind="gauge" />{title}</span>
+      <strong><TrendIcon trend={trend} /><OutpacingIcon active={outpacing} label={outpacingLabel} />{value}</strong>
+      <small><MiniIcon kind="clock" />{sub}</small>
+    </article>
+  );
+}
+
+function StatChip({ label, value, icon }: { label: string; value: string; icon?: "bolt" | "tokens" | "cache" | "requests" | "clock" | "gauge" }) {
+  return (
+    <span className="stat-chip">
       {icon && <MiniIcon kind={icon} />}
       <span>{label}</span>
       <strong>{value}</strong>
@@ -900,9 +943,9 @@ function StatChip({ label, value, icon, detail }: { label: string; value: string
   );
 }
 
-function SourceChip({ icon, children, detail }: { icon: "provider" | "tokens" | "gauge"; children: React.ReactNode; detail: string }) {
+function SourceChip({ icon, children }: { icon: "provider" | "tokens" | "gauge"; children: React.ReactNode }) {
   return (
-    <span className="source-chip" {...tooltipText(detail)}>
+    <span className="source-chip">
       <MiniIcon kind={icon} />
       <span>{children}</span>
     </span>
@@ -936,30 +979,32 @@ function ProviderUsagePanel({ collapsed, onToggle, usage, trends, outpacing, cal
     && Number.isFinite(resetMs)
     && resetMs > Date.now();
   return (
-    <section className="panel provider-usage">
+    <section className={`panel provider-usage ${collapsed ? "is-collapsed" : ""}`}>
       <div className="provider-title">
         <div>
           <h2>{usage.display_label}</h2>
           <p className="muted">
-            <SourceChip icon="provider" detail={snapshot.is_estimate ? "This provider is currently showing a labelled local estimate." : "This provider is showing data from its configured local source."}>
+            <SourceChip icon="provider">
               {snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"}
             </SourceChip>
-            <SourceChip icon="gauge" detail={`Data source: ${snapshot.source}`}>
+            <SourceChip icon="gauge">
               Source: {snapshot.source}
             </SourceChip>
             {snapshot.model_name && (
-              <SourceChip icon="tokens" detail={`Latest model reported by the provider source: ${snapshot.model_name}`}>
+              <SourceChip icon="tokens">
                 Model: {snapshot.model_name}
               </SourceChip>
             )}
           </p>
         </div>
-        <button className="icon-toggle" onClick={onToggle} type="button" title={collapsed ? "Show provider details" : "Hide provider details"} aria-label={collapsed ? "Show provider details" : "Hide provider details"}>
+        <button className="icon-toggle" onClick={onToggle} type="button" aria-label={collapsed ? "Show provider details" : "Hide provider details"}>
           <ChevronIcon expanded={!collapsed} />
         </button>
         {snapshot.error_state && <span className="error">{snapshot.error_state}</span>}
       </div>
-      {!collapsed && (
+      {collapsed ? (
+        <CollapsedProviderSummary usage={usage} trends={trends} outpacing={outpacing} />
+      ) : (
         <>
       {snapshot.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
       <div className="grid two">
@@ -1006,7 +1051,7 @@ function ForecastSection({ usage }: { usage: ProviderUsage }) {
     <section className="subsection">
       <div className="section-row">
         <h3><MiniIcon kind="bolt" />Forecasts</h3>
-        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show forecasts" : "Hide forecasts"} aria-label={collapsed ? "Show forecasts" : "Hide forecasts"}>
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" aria-label={collapsed ? "Show forecasts" : "Hide forecasts"}>
           <ChevronIcon expanded={!collapsed} />
         </button>
       </div>
@@ -1051,7 +1096,7 @@ function TotalsSection({ usage, session, week }: { usage: ProviderUsage; session
     <section className="subsection">
       <div className="section-row">
         <h3><MiniIcon kind="tokens" />Token totals</h3>
-        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show token totals" : "Hide token totals"} aria-label={collapsed ? "Show token totals" : "Hide token totals"}>
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" aria-label={collapsed ? "Show token totals" : "Hide token totals"}>
           <ChevronIcon expanded={!collapsed} />
         </button>
       </div>
@@ -1071,7 +1116,7 @@ function ProviderTimeline({ usage }: { usage: ProviderUsage }) {
     <section className="timeline">
       <div className="timeline-head">
         <h3>{usage.display_label} Session Timeline</h3>
-        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" title={collapsed ? "Show timeline table" : "Hide timeline table"} aria-label={collapsed ? "Show timeline table" : "Hide timeline table"}>
+        <button className="icon-toggle" onClick={() => setCollapsed((value) => !value)} type="button" aria-label={collapsed ? "Show timeline table" : "Hide timeline table"}>
           <ChevronIcon expanded={!collapsed} />
         </button>
       </div>
