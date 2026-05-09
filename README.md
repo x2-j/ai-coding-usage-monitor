@@ -85,6 +85,14 @@ debug_start_tauri.bat
 
 ## Build The Tauri App
 
+On Ubuntu/Debian, install the native Tauri/WebKit build dependencies first:
+
+```bash
+sudo apt install build-essential pkg-config libdbus-1-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libgtk-3-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Then build from the Tauri app folder:
+
 ```bat
 cd desktop
 npm run build
@@ -95,6 +103,8 @@ The build prepares the Rust statusline sidecar, builds the React frontend, compi
 ```text
 desktop\src-tauri\target\release\bundle\nsis\
 ```
+
+The current bundle config targets Windows NSIS. For Ubuntu/Debian packaging, add an appropriate Linux bundle target such as `deb` or `appimage` in `desktop/src-tauri/tauri.conf.json`, then run the same `npm run build` command on the Linux host.
 
 ## Run The Python App
 

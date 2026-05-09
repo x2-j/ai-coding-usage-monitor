@@ -29,6 +29,24 @@ npm run build
 The build script compiles and stages the `statusline_capture` sidecar before
 running the Tauri NSIS bundle.
 
+## Build on Ubuntu/Debian
+
+Install the native Tauri/WebKit dependencies before running the build:
+
+```bash
+sudo apt install build-essential pkg-config libdbus-1-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libgtk-3-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Then run:
+
+```bash
+cd desktop
+npm install
+npm run build
+```
+
+The current Tauri config targets the Windows NSIS bundle. To create Ubuntu/Debian artifacts, add a Linux target such as `deb` or `appimage` to `desktop/src-tauri/tauri.conf.json` before building on Linux.
+
 ## Privacy boundary
 
 The React frontend only renders sanitized state returned by Tauri commands.
