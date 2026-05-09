@@ -38,6 +38,8 @@ export interface ProviderAvailability {
   available: boolean;
   source: string;
   message: string | null;
+  configuration_note: string;
+  data_description: string;
   has_data: boolean;
   tracking_enabled: boolean;
 }

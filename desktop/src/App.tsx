@@ -19,7 +19,7 @@ import {
   setupStatusline
 } from "./api";
 import { installTray, showWindow } from "./tray";
-import type { AppSettings, MonitorState, ProviderUsage, UsageTotals, WidgetMode } from "./types";
+import type { AppSettings, MonitorState, ProviderAvailability, ProviderUsage, UsageTotals, WidgetMode } from "./types";
 
 const chartColors = ["#ffd97a", "#8bd3ff", "#ac84ff", "#70e0ad"];
 const tooltipStyle = {
@@ -46,9 +46,28 @@ type UsageTrend = {
   severity: "normal" | "warning" | "critical";
 };
 type UsageTrendMap = Record<string, { session?: UsageTrend; weekly?: UsageTrend }>;
+type InternalNotification = {
+  id: string;
+  title: string;
+  message: string;
+};
+type LimitKind = "session" | "weekly";
+type LimitOutpacingMap = Record<string, { session: boolean; weekly: boolean }>;
+
+const usageThresholds = [80, 90, 100] as const;
 
 function fmt(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "n/a";
+  return Math.round(n).toLocaleString();
+}
+
+function compactNumber(n: number | null | undefined) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "n/a";
+  const abs = Math.abs(n);
+  const scaled = (value: number, divisor: number, suffix: string) => `${(value / divisor).toFixed(abs >= divisor * 10 ? 0 : 1).replace(/\.0$/, "")}${suffix}`;
+  if (abs >= 1_000_000_000) return scaled(n, 1_000_000_000, "B");
+  if (abs >= 1_000_000) return scaled(n, 1_000_000, "M");
+  if (abs >= 1_000) return scaled(n, 1_000, "K");
   return Math.round(n).toLocaleString();
 }
 
@@ -95,6 +114,22 @@ function timeLabel(value: string) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function tooltipText(text: string) {
+  return { title: text, "data-tooltip": text };
+}
+
+function chartValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function pctTooltipFormatter(value: unknown, name: unknown) {
+  return [pct(chartValue(value)), String(name)];
+}
+
+function tokenTooltipFormatter(value: unknown, name: unknown) {
+  return [compactNumber(chartValue(value)), String(name)];
+}
+
 function startWindowDrag() {
   getCurrentWindow().startDragging().catch(() => undefined);
 }
@@ -136,6 +171,15 @@ function TrendIcon({ trend }: { trend?: UsageTrend }) {
   return (
     <span className={`trend-icon ${trend.kind} ${trend.severity}`} title={label} aria-label={label}>
       {trend.kind === "up" ? <ArrowUpIcon /> : <ResetArrowIcon />}
+    </span>
+  );
+}
+
+function OutpacingIcon({ active, label }: { active?: boolean; label: string }) {
+  if (!active) return null;
+  return (
+    <span className="outpacing-icon" title={label} aria-label={label}>
+      !
     </span>
   );
 }
@@ -186,7 +230,7 @@ function RefreshIcon() {
   );
 }
 
-function MiniIcon({ kind }: { kind: "clock" | "bolt" | "gauge" | "tokens" | "cache" | "requests" | "provider" }) {
+function MiniIcon({ kind }: { kind: "clock" | "bolt" | "gauge" | "tokens" | "cache" | "requests" | "provider" | "agents" }) {
   return <span className={`mini-icon ${kind}`} aria-hidden="true" />;
 }
 
@@ -216,6 +260,166 @@ function widgetSeverity(state: MonitorState): UsageTrend["severity"] {
   }, "normal");
 }
 
+function notificationId(title: string, message: string) {
+  return `${Date.now()}-${title}-${message}`;
+}
+
+function notifyDesktop(title: string, message: string) {
+  if (typeof window === "undefined" || !("Notification" in window)) return;
+  const show = () => {
+    try {
+      new Notification(title, { body: message });
+    } catch {
+      // The in-app notification remains the reliable fallback.
+    }
+  };
+  if (Notification.permission === "granted") {
+    show();
+  } else if (Notification.permission === "default") {
+    Notification.requestPermission().then((permission) => {
+      if (permission === "granted") show();
+    }).catch(() => undefined);
+  }
+}
+
+function thresholdLabel(percent: number) {
+  return percent >= 100 ? "hit" : "approaching";
+}
+
+function limitNotificationMessage(provider: string, limitName: LimitKind, threshold: number, value: number) {
+  const displayLimit = limitName === "session" ? "Session" : "Weekly";
+  return `${provider} ${displayLimit} usage is ${thresholdLabel(threshold)} ${threshold}% (${value.toFixed(1)}%).`;
+}
+
+function minutesUntil(iso: string | null | undefined) {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return ms / 60000;
+}
+
+function isOutpacingLimit(usage: ProviderUsage, limitName: LimitKind) {
+  const burn = limitName === "session" ? usage.burn.session : usage.burn.week;
+  const resetAt = limitName === "session" ? usage.snapshot.session_reset_at : usage.snapshot.weekly_reset_at;
+  const value = limitName === "session" ? usage.snapshot.session_usage_percent : usage.snapshot.weekly_usage_percent;
+  const resetMinutes = minutesUntil(resetAt);
+  const limitMinutes = burn.minutes_until_limit;
+  if (value === null || value === undefined || Number.isNaN(value) || value >= 100) return false;
+  if (resetMinutes === null || limitMinutes === null || limitMinutes <= 0) return false;
+  return limitMinutes < resetMinutes;
+}
+
+function outpacingLimits(state: MonitorState): LimitOutpacingMap {
+  return Object.fromEntries(state.provider_usages.map((usage) => [
+    usage.provider_id,
+    {
+      session: isOutpacingLimit(usage, "session"),
+      weekly: isOutpacingLimit(usage, "weekly")
+    }
+  ]));
+}
+
+function outpacingLabel(provider: string, limitName: LimitKind) {
+  const displayLimit = limitName === "session" ? "session" : "weekly";
+  return `Careful, you are outpacing your ${displayLimit} limit for ${provider}.`;
+}
+
+function InternalNotificationBar({ notification, onClose }: { notification: InternalNotification; onClose: () => void }) {
+  useEffect(() => {
+    const id = window.setTimeout(onClose, 30000);
+    return () => window.clearTimeout(id);
+  }, [notification.id, onClose]);
+
+  return (
+    <section className="notice internal-notification" role="status" aria-live="polite">
+      <span className="notification-icon" aria-hidden="true">!</span>
+      <div>
+        <strong>{notification.title}</strong>
+        <p>{notification.message}</p>
+      </div>
+      <button className="notification-close" onClick={onClose} type="button" aria-label="Dismiss notification" title="Dismiss notification">
+        <CloseIcon />
+      </button>
+    </section>
+  );
+}
+
+function InternalNotificationHost({ notifications, onClose }: { notifications: InternalNotification[]; onClose: (id: string) => void }) {
+  if (notifications.length === 0) return null;
+  return (
+    <div className="internal-notification-stack">
+      {notifications.map((item) => (
+        <InternalNotificationBar key={item.id} notification={item} onClose={() => onClose(item.id)} />
+      ))}
+    </div>
+  );
+}
+
+function ProviderConnectionPill({ state, onClick }: { state: MonitorState; onClick: () => void }) {
+  const connectedCount = state.provider_usages.length;
+  const label = connectedCount > 0 ? "Connected" : "No Data";
+  const tooltip = connectedCount > 0
+    ? `${connectedCount} provider${connectedCount === 1 ? "" : "s"} currently have usable local usage data. Click for provider setup details.`
+    : "No providers currently have usable local usage data. Click for setup details.";
+
+  return (
+    <button
+      className={`provider-status ${connectedCount > 0 ? "connected" : "no-data"}`}
+      onClick={onClick}
+      type="button"
+      {...tooltipText(tooltip)}
+      aria-label={tooltip}
+    >
+      <MiniIcon kind="agents" />
+      <strong>{connectedCount}</strong>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function ProviderDetailsModal({ providers, onClose }: { providers: ProviderAvailability[]; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="provider-help-title"
+        aria-modal="true"
+        className="modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="modal-head">
+          <div>
+            <h2 id="provider-help-title">Provider Setup</h2>
+            <p>Each adapter reads local usage data only. No credentials, prompts, responses, or account pages are scanned.</p>
+          </div>
+          <button className="notification-close" onClick={onClose} type="button" aria-label="Close provider setup" title="Close provider setup">
+            <CloseIcon />
+          </button>
+        </div>
+        <div className="provider-help-list">
+          {providers.map((provider) => {
+            const stateLabel = provider.has_data ? "Connected" : provider.available ? "Detected" : "No Data";
+            const stateClass = provider.has_data ? "connected" : provider.available ? "detected" : "no-data";
+            return (
+              <article className="provider-help-card" key={provider.provider_id}>
+                <div className="provider-help-title">
+                  <strong>{provider.display_label}</strong>
+                  <span className={`provider-help-state ${stateClass}`} {...tooltipText(`${provider.display_label}: ${provider.message || provider.source}`)}>
+                    {stateLabel}
+                  </span>
+                </div>
+                <p>{provider.configuration_note}</p>
+                <p>{provider.data_description}</p>
+                <small>{provider.message || provider.source}</small>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -224,10 +428,77 @@ export default function App() {
   const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(() => new Set());
   const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(() => new Set());
   const [trends, setTrends] = useState<UsageTrendMap>({});
+  const [notifications, setNotifications] = useState<InternalNotification[]>([]);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
   const stateRef = useRef<MonitorState | null>(null);
+  const deliveredNotifications = useRef<Set<string>>(new Set());
+
+  function pushNotification(title: string, message: string, stableKey?: string) {
+    if (stableKey && deliveredNotifications.current.has(stableKey)) return;
+    if (stableKey) deliveredNotifications.current.add(stableKey);
+    setNotifications((current) => [...current.slice(-2), { id: notificationId(title, message), title, message }]);
+    notifyDesktop(title, message);
+  }
+
+  function closeNotification(id: string) {
+    setNotifications((current) => current.filter((item) => item.id !== id));
+  }
+
+  function notifyUsageThresholds(previous: MonitorState | null, next: MonitorState) {
+    for (const usage of next.provider_usages) {
+      const previousUsage = previous?.provider_usages.find((candidate) => candidate.provider_id === usage.provider_id);
+      const limits = [
+        {
+          name: "session" as const,
+          value: usage.snapshot.session_usage_percent,
+          previousValue: previousUsage?.snapshot.session_usage_percent
+        },
+        {
+          name: "weekly" as const,
+          value: usage.snapshot.weekly_usage_percent,
+          previousValue: previousUsage?.snapshot.weekly_usage_percent
+        }
+      ];
+
+      for (const limit of limits) {
+        if (limit.value === null || limit.value === undefined || Number.isNaN(limit.value)) continue;
+        for (const threshold of usageThresholds) {
+          const crossed = limit.previousValue === null
+            || limit.previousValue === undefined
+            || Number.isNaN(limit.previousValue)
+            || limit.previousValue < threshold;
+          if (limit.value >= threshold && crossed) {
+            const key = `${usage.provider_id}:${limit.name}:${threshold}:${usage.snapshot.session_reset_at || "session"}:${usage.snapshot.weekly_reset_at || "weekly"}`;
+            pushNotification(
+              `Usage ${thresholdLabel(threshold)}`,
+              limitNotificationMessage(usage.display_label, limit.name, threshold, limit.value),
+              key
+            );
+          }
+        }
+      }
+    }
+  }
+
+  function notifyOutpacingLimits(previous: MonitorState | null, next: MonitorState) {
+    for (const usage of next.provider_usages) {
+      const previousUsage = previous?.provider_usages.find((candidate) => candidate.provider_id === usage.provider_id);
+      for (const limitName of ["session", "weekly"] as LimitKind[]) {
+        const active = isOutpacingLimit(usage, limitName);
+        const wasActive = previousUsage ? isOutpacingLimit(previousUsage, limitName) : false;
+        if (!active || wasActive) continue;
+        const resetAt = limitName === "session" ? usage.snapshot.session_reset_at : usage.snapshot.weekly_reset_at;
+        const key = `${usage.provider_id}:${limitName}:outpacing:${resetAt || "unknown-reset"}`;
+        pushNotification("Usage pace warning", outpacingLabel(usage.display_label, limitName), key);
+      }
+    }
+  }
 
   function applyMonitorState(next: MonitorState) {
-    setTrends(usageTrends(stateRef.current, next));
+    const previous = stateRef.current;
+    setTrends(usageTrends(previous, next));
+    notifyUsageThresholds(previous, next);
+    notifyOutpacingLimits(previous, next);
     stateRef.current = next;
     setState(next);
   }
@@ -278,25 +549,34 @@ export default function App() {
 
   const chartData = useMemo(() => {
     const rows = new Map<string, Record<string, number | string | null>>();
-    for (const point of state?.history || []) {
+    const lastValues = new Map<string, Record<string, number | null>>();
+    const points = [...(state?.history || [])].sort((a, b) => a.timestamp_utc.localeCompare(b.timestamp_utc));
+    for (const point of points) {
       const key = point.timestamp_utc;
       const row = rows.get(key) || {
         timestamp_utc: point.timestamp_utc,
         label: timeLabel(point.timestamp_utc)
       };
-      row[chartKey(point.provider_id, "session_usage_percent")] = point.session_usage_percent;
-      row[chartKey(point.provider_id, "weekly_usage_percent")] = point.weekly_usage_percent;
-      row[chartKey(point.provider_id, "session_tokens")] = point.session_tokens;
+      lastValues.set(point.provider_id, {
+        [chartKey(point.provider_id, "session_usage_percent")]: point.session_usage_percent,
+        [chartKey(point.provider_id, "weekly_usage_percent")]: point.weekly_usage_percent,
+        [chartKey(point.provider_id, "session_tokens")]: point.session_tokens
+      });
+      for (const values of lastValues.values()) {
+        Object.assign(row, values);
+      }
       rows.set(key, row);
     }
     return Array.from(rows.values()).sort((a, b) => String(a.timestamp_utc).localeCompare(String(b.timestamp_utc)));
   }, [state]);
 
+  const outpacing = useMemo(() => state ? outpacingLimits(state) : {}, [state]);
+
   if (!state) {
     return (
       <main className="shell">
         <p className="status">{error ? "Could not load usage data." : "Loading usage data..."}</p>
-        {error && <section className="notice error">{error}</section>}
+        {error && <InternalNotificationBar notification={{ id: "load-error", title: "Could not load usage data", message: error }} onClose={() => setError(null)} />}
       </main>
     );
   }
@@ -316,6 +596,7 @@ export default function App() {
       <WidgetView
         state={state}
         trends={trends}
+        outpacing={outpacing}
         onOpen={() => showWindow("main")}
         onStateChange={applyMonitorState}
         onUpdateSettings={updateSettings}
@@ -327,7 +608,7 @@ export default function App() {
     setSaving(true);
     try {
       const updated = await calibrateClaudeSession(percent);
-      setError(`Claude session calibrated at ${percent.toFixed(1)}%.`);
+      pushNotification("Claude calibration saved", `Claude session calibration is now anchored at ${percent.toFixed(1)}%.`);
       applyMonitorState(updated);
     } catch (e) {
       setError(String(e));
@@ -343,18 +624,20 @@ export default function App() {
           <h1>Simple AI Usage Monitor</h1>
           <p>Local-first AI coding-agent usage telemetry with tray and floating widget views.</p>
         </div>
-        <div className={`pill ${state.app_state}`}>{state.status_message}</div>
+        <ProviderConnectionPill state={state} onClick={() => setProviderModalOpen(true)} />
       </header>
+      {providerModalOpen && <ProviderDetailsModal providers={state.providers} onClose={() => setProviderModalOpen(false)} />}
 
       <section className="toolbar">
         <button onClick={() => refreshUsage().then(applyMonitorState)}>Refresh</button>
         <button onClick={() => showWindow("widget")}>Show Widget</button>
         <button onClick={() => openUsagePage()}>Open Usage Page</button>
-        <button onClick={() => setupStatusline().then((message) => setError(message))}>Install Statusline</button>
+        <button onClick={() => setupStatusline().then((message) => pushNotification("Statusline updated", message)).catch((e) => setError(String(e)))}>Install Statusline</button>
       </section>
 
       {state.app_state === "paused" && <section className="notice">No provider usage data found yet. Providers without local usage data are hidden.</section>}
-      {error && <section className="notice error">{error}</section>}
+      <InternalNotificationHost notifications={notifications} onClose={closeNotification} />
+      {error && <InternalNotificationBar notification={{ id: `error-${error}`, title: "Action failed", message: error }} onClose={() => setError(null)} />}
 
       <section className="panel">
         <h2>Rolling 5-hour graphs</h2>
@@ -385,7 +668,7 @@ export default function App() {
               <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
               <XAxis dataKey="label" stroke="var(--muted)" />
               <YAxis stroke="var(--muted)" domain={[0, 100]} />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
+              <Tooltip contentStyle={tooltipStyle} formatter={pctTooltipFormatter} labelStyle={tooltipLabelStyle} />
               {visibleProviderSeries.map((series) => (
                 <Line
                   key={series.usageKey}
@@ -393,7 +676,9 @@ export default function App() {
                   type="monotone"
                   dataKey={series.usageKey}
                   stroke={series.color}
+                  strokeWidth={2.4}
                   dot={chartData.length < 2}
+                  activeDot={{ r: 5, strokeWidth: 2 }}
                   connectNulls
                 />
               ))}
@@ -405,7 +690,9 @@ export default function App() {
                   dataKey={series.weeklyKey}
                   stroke={series.color}
                   strokeDasharray="4 4"
+                  strokeWidth={2.1}
                   dot={false}
+                  activeDot={{ r: 5, strokeWidth: 2 }}
                   connectNulls
                 />
               ))}
@@ -415,8 +702,8 @@ export default function App() {
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
               <XAxis dataKey="label" stroke="var(--muted)" />
-              <YAxis stroke="var(--muted)" />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} />
+              <YAxis stroke="var(--muted)" tickFormatter={compactNumber} />
+              <Tooltip contentStyle={tooltipStyle} formatter={tokenTooltipFormatter} labelStyle={tooltipLabelStyle} />
               {visibleProviderSeries.map((series) => (
                 <Line
                   key={series.tokenKey}
@@ -424,7 +711,9 @@ export default function App() {
                   type="monotone"
                   dataKey={series.tokenKey}
                   stroke={series.color}
+                  strokeWidth={2.4}
                   dot={chartData.length < 2}
+                  activeDot={{ r: 5, strokeWidth: 2 }}
                   connectNulls
                 />
               ))}
@@ -452,6 +741,7 @@ export default function App() {
               })}
               usage={usage}
               trends={trends[usage.provider_id]}
+              outpacing={outpacing[usage.provider_id]}
               calibration={state.settings}
               saving={saving}
               onCalibrate={calibrateSession}
@@ -471,12 +761,14 @@ export default function App() {
 function WidgetView({
   state,
   trends,
+  outpacing,
   onOpen,
   onStateChange,
   onUpdateSettings
 }: {
   state: MonitorState;
   trends: UsageTrendMap;
+  outpacing: LimitOutpacingMap;
   onOpen: () => void;
   onStateChange: (state: MonitorState) => void;
   onUpdateSettings: (settings: AppSettings) => Promise<void>;
@@ -562,7 +854,7 @@ function WidgetView({
       ) : (
         <>
           {state.provider_usages.map((usage) => (
-            <WidgetProviderRows key={usage.provider_id} trends={trends[usage.provider_id]} usage={usage} />
+            <WidgetProviderRows key={usage.provider_id} trends={trends[usage.provider_id]} outpacing={outpacing[usage.provider_id]} usage={usage} />
           ))}
           {state.provider_usages.length === 0 && <small>No provider data.</small>}
           {mode === "full" && <small>{state.status_message}</small>}
@@ -572,37 +864,47 @@ function WidgetView({
   );
 }
 
-function WidgetProviderRows({ usage, trends }: { usage: ProviderUsage; trends?: UsageTrendMap[string] }) {
+function WidgetProviderRows({ usage, trends, outpacing }: { usage: ProviderUsage; trends?: UsageTrendMap[string]; outpacing?: LimitOutpacingMap[string] }) {
   const snapshot = usage.snapshot;
   return (
     <div className="widget-provider">
       <strong>{usage.display_label}</strong>
-      <WidgetRow label="Session" trend={trends?.session} value={limitValue(snapshot.session_usage_percent)} reset={snapshot.session_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot.session_reset_at)} />
-      <WidgetRow label="Weekly" trend={trends?.weekly} value={limitValue(snapshot.weekly_usage_percent)} reset={snapshot.weekly_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot.weekly_reset_at)} />
+      <WidgetRow label="Session" trend={trends?.session} outpacing={outpacing?.session} outpacingLabel={outpacingLabel(usage.display_label, "session")} value={limitValue(snapshot.session_usage_percent)} reset={snapshot.session_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.session_reset_at ? "local estimate" : countdown(snapshot.session_reset_at)} />
+      <WidgetRow label="Weekly" trend={trends?.weekly} outpacing={outpacing?.weekly} outpacingLabel={outpacingLabel(usage.display_label, "weekly")} value={limitValue(snapshot.weekly_usage_percent)} reset={snapshot.weekly_usage_percent == null ? "no limit data" : snapshot.is_estimate && !snapshot.weekly_reset_at ? "local estimate" : countdown(snapshot.weekly_reset_at)} />
     </div>
   );
 }
 
-function WidgetRow({ label, value, reset, trend }: { label: string; value: string; reset: string; trend?: UsageTrend }) {
-  return <div className="widget-row"><span>{label}</span><strong><TrendIcon trend={trend} />{value}</strong><em>{reset}</em></div>;
+function WidgetRow({ label, value, reset, trend, outpacing, outpacingLabel }: { label: string; value: string; reset: string; trend?: UsageTrend; outpacing?: boolean; outpacingLabel: string }) {
+  return <div className="widget-row"><span>{label}</span><strong><TrendIcon trend={trend} /><OutpacingIcon active={outpacing} label={outpacingLabel} />{value}</strong><em>{reset}</em></div>;
 }
 
-function MetricCard({ title, value, sub, trend }: { title: string; value: string; sub: string; trend?: UsageTrend }) {
+function MetricCard({ title, value, sub, trend, outpacing, outpacingLabel }: { title: string; value: string; sub: string; trend?: UsageTrend; outpacing?: boolean; outpacingLabel: string }) {
   return (
     <section className="metric">
       <span><MiniIcon kind="gauge" />{title}</span>
-      <strong><TrendIcon trend={trend} /><span className="value-chip primary">{value}</span></strong>
+      <strong><TrendIcon trend={trend} /><OutpacingIcon active={outpacing} label={outpacingLabel} /><span className="value-chip primary">{value}</span></strong>
       <small><MiniIcon kind="clock" />{sub}</small>
     </section>
   );
 }
 
-function StatChip({ label, value, icon }: { label: string; value: string; icon?: "bolt" | "tokens" | "cache" | "requests" | "clock" | "gauge" }) {
+function StatChip({ label, value, icon, detail }: { label: string; value: string; icon?: "bolt" | "tokens" | "cache" | "requests" | "clock" | "gauge"; detail?: string }) {
+  const tooltip = detail || `${label}: ${value}`;
   return (
-    <span className="stat-chip">
+    <span className="stat-chip" {...tooltipText(tooltip)}>
       {icon && <MiniIcon kind={icon} />}
       <span>{label}</span>
       <strong>{value}</strong>
+    </span>
+  );
+}
+
+function SourceChip({ icon, children, detail }: { icon: "provider" | "tokens" | "gauge"; children: React.ReactNode; detail: string }) {
+  return (
+    <span className="source-chip" {...tooltipText(detail)}>
+      <MiniIcon kind={icon} />
+      <span>{children}</span>
     </span>
   );
 }
@@ -622,7 +924,7 @@ function TotalsCard({ title, totals }: { title: string; totals: UsageTotals }) {
   );
 }
 
-function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, saving, onCalibrate }: { collapsed: boolean; onToggle: () => void; usage: ProviderUsage; trends?: UsageTrendMap[string]; calibration: AppSettings; saving: boolean; onCalibrate: (percent: number) => void }) {
+function ProviderUsagePanel({ collapsed, onToggle, usage, trends, outpacing, calibration, saving, onCalibrate }: { collapsed: boolean; onToggle: () => void; usage: ProviderUsage; trends?: UsageTrendMap[string]; outpacing?: LimitOutpacingMap[string]; calibration: AppSettings; saving: boolean; onCalibrate: (percent: number) => void }) {
   const snapshot = usage.snapshot;
   const session = usage.totals.session || emptyTotals;
   const week = usage.totals.week || emptyTotals;
@@ -639,9 +941,17 @@ function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, s
         <div>
           <h2>{usage.display_label}</h2>
           <p className="muted">
-            <span className="source-chip"><MiniIcon kind="provider" />{snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"}</span>
-            <span className="source-chip">Source: {snapshot.source}</span>
-            {snapshot.model_name && <span className="source-chip">Model: {snapshot.model_name}</span>}
+            <SourceChip icon="provider" detail={snapshot.is_estimate ? "This provider is currently showing a labelled local estimate." : "This provider is showing data from its configured local source."}>
+              {snapshot.is_estimate ? "Local fallback estimate" : "Provider statusline"}
+            </SourceChip>
+            <SourceChip icon="gauge" detail={`Data source: ${snapshot.source}`}>
+              Source: {snapshot.source}
+            </SourceChip>
+            {snapshot.model_name && (
+              <SourceChip icon="tokens" detail={`Latest model reported by the provider source: ${snapshot.model_name}`}>
+                Model: {snapshot.model_name}
+              </SourceChip>
+            )}
           </p>
         </div>
         <button className="icon-toggle" onClick={onToggle} type="button" title={collapsed ? "Show provider details" : "Hide provider details"} aria-label={collapsed ? "Show provider details" : "Hide provider details"}>
@@ -653,8 +963,8 @@ function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, s
         <>
       {snapshot.raw_limit_name && <p className="muted">{snapshot.raw_limit_name}</p>}
       <div className="grid two">
-        <MetricCard title="Session" trend={trends?.session} value={limitValue(snapshot.session_usage_percent)} sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)} />
-        <MetricCard title="Weekly" trend={trends?.weekly} value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
+        <MetricCard title="Session" trend={trends?.session} outpacing={outpacing?.session} outpacingLabel={outpacingLabel(usage.display_label, "session")} value={limitValue(snapshot.session_usage_percent)} sub={resetLabel(snapshot.session_reset_at, snapshot.session_usage_percent, snapshot.is_estimate)} />
+        <MetricCard title="Weekly" trend={trends?.weekly} outpacing={outpacing?.weekly} outpacingLabel={outpacingLabel(usage.display_label, "weekly")} value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
       </div>
       <ForecastSection usage={usage} />
       {showCalibration && (

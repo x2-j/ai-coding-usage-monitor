@@ -24,6 +24,8 @@ pub struct ProviderAvailability {
     pub available: bool,
     pub source: String,
     pub message: Option<String>,
+    pub configuration_note: String,
+    pub data_description: String,
     pub has_data: bool,
     pub tracking_enabled: bool,
 }
@@ -41,8 +43,12 @@ Field notes:
 | `available` | boolean | The tool/source exists locally. |
 | `source` | short label | Data source label shown to the user. |
 | `message` | optional sentence | Safe status detail. Do not include private paths. |
+| `configuration_note` | safe setup sentence | Explains how the user enables/configures this provider. This appears in the provider setup modal. |
+| `data_description` | safe data-source sentence | Explains how this provider gets usage data. This appears in the provider setup modal. |
 | `has_data` | boolean | True only when usable local usage data exists. |
 | `tracking_enabled` | boolean | False for opt-in providers until enabled. |
+
+The dashboard header uses `has_data` to show the compact provider connection status. If one or more providers have data, it shows the connected provider count and `Connected`; otherwise it shows `No Data`. Clicking that status opens the provider setup modal, so every adapter must keep `configuration_note`, `data_description`, `source`, and `message` concise, safe, and free of credentials, prompts, responses, project names, or full local paths.
 
 ### `UsageSnapshot`
 
@@ -71,6 +77,8 @@ pub struct UsageSnapshot {
 Use UTC ISO-8601 strings for `timestamp_utc`, `session_reset_at`, and `weekly_reset_at`.
 
 Use `None` when a provider does not supply a field. Missing usage percentages are allowed; `apply_estimates` can derive local fallback percentages from configured token budgets.
+
+The dashboard automatically uses `session_usage_percent`, `weekly_usage_percent`, `session_reset_at`, `weekly_reset_at`, and local history to show threshold notifications, desktop alerts, and outpacing warnings. To get the full shared UI behaviour for a new provider, populate both the percentage and reset timestamp for each limit window when the data source can do so safely. If either value is unavailable, the provider still renders normally, but the outpacing warning for that limit cannot be calculated.
 
 ### `UsageTotals`
 
@@ -251,6 +259,8 @@ fn example_availability(settings: &AppSettings) -> ProviderAvailability {
         } else {
             "Example CLI detected, but local tracking is disabled.".to_string()
         }),
+        configuration_note: "Enable Example tracking in Settings, then use Example CLI normally so local usage records are created.".to_string(),
+        data_description: "Reads local Example CLI JSONL token counters and never reads credentials, prompts, responses, or account pages.".to_string(),
         has_data: has_records,
         tracking_enabled: settings.example_tracking_enabled,
     }

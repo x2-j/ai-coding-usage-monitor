@@ -96,6 +96,8 @@ pub struct ProviderAvailability {
     pub available: bool,
     pub source: String,
     pub message: Option<String>,
+    pub configuration_note: String,
+    pub data_description: String,
     pub has_data: bool,
     pub tracking_enabled: bool,
 }

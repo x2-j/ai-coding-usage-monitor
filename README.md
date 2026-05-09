@@ -42,6 +42,8 @@ At a high level, a provider must supply:
 - `UsageTotals`: token totals for `session`, `today`, `week`, and `all`.
 - Optional parsing helpers for local JSON, JSONL, statusline output, or exported data.
 
+The dashboard header shows how many providers currently have usable local data. Clicking that status opens provider setup details sourced from each adapter's safe configuration note and data-source description, so new providers should document both in `ProviderAvailability`.
+
 Adapters must not read credential files, scrape dashboards, store prompt/response content, or log private paths. If a provider requires network access or credentials, treat that as a separate opt-in feature behind explicit approval and configuration.
 
 ## Privacy

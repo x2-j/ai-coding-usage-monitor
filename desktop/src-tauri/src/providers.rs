@@ -45,6 +45,8 @@ fn claude_availability(settings: &AppSettings, data_dir: &Path) -> ProviderAvail
             available: true,
             source: "Claude Code statusline".to_string(),
             message: Some("Statusline capture file is available.".to_string()),
+            configuration_note: "Install the local statusline capture from the dashboard or run install_statusline.bat, then send a new Claude Code message so the capture file is written.".to_string(),
+            data_description: "Reads the local sanitized Claude Code statusline snapshot first, then falls back to Claude Code local JSONL token counters for labelled estimates.".to_string(),
             has_data: true,
             tracking_enabled: true,
         };
@@ -61,6 +63,8 @@ fn claude_availability(settings: &AppSettings, data_dir: &Path) -> ProviderAvail
         } else {
             "No Claude Code usage data found.".to_string()
         }),
+        configuration_note: "Install the local statusline capture from the dashboard or run install_statusline.bat. Local log fallback estimates appear when Claude Code logs exist.".to_string(),
+        data_description: "Uses local Claude Code statusline rate-limit data when available. Local JSONL logs are used only for token totals and clearly labelled fallback estimates.".to_string(),
         has_data: has_logs,
         tracking_enabled: true,
     }
@@ -76,6 +80,8 @@ fn codex_availability(settings: &AppSettings) -> ProviderAvailability {
             available: false,
             source: "Codex CLI".to_string(),
             message: Some("Codex CLI is not on PATH.".to_string()),
+            configuration_note: "Install Codex CLI and ensure the codex command is available on PATH. Enable local tracking in this app before Codex session files are scanned.".to_string(),
+            data_description: "No data is read until Codex CLI is detected and local tracking is enabled. The adapter reads local Codex session JSONL token counters only.".to_string(),
             has_data: false,
             tracking_enabled: settings.codex_tracking_enabled,
         };
@@ -92,6 +98,8 @@ fn codex_availability(settings: &AppSettings) -> ProviderAvailability {
         } else {
             "Codex CLI detected, but local tracking is disabled.".to_string()
         }),
+        configuration_note: "Click Enable Tracking in the Providers panel, then use Codex CLI normally so local session JSONL token counters are created.".to_string(),
+        data_description: "Reads local Codex CLI session JSONL token counters. Percentages are local fallback estimates from configured budgets, not exact ChatGPT or Codex plan usage.".to_string(),
         has_data: has_records,
         tracking_enabled: settings.codex_tracking_enabled,
     }
