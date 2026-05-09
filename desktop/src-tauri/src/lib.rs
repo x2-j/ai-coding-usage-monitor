@@ -9,7 +9,7 @@ mod storage;
 use crate::config::{default_app_data_dir, sanitize_settings};
 use crate::forecast::{calculate_burn, detect_spikes};
 use crate::import_legacy::import_legacy_if_needed;
-use crate::models::{AppSettings, BurnRateProjection, MonitorState, ProviderUsage};
+use crate::models::{AppSettings, BurnRateProjection, MonitorState, ProviderUsage, UsageSnapshot, UsageTotals};
 use crate::providers::{collect_provider, provider_availability};
 use crate::storage::Store;
 use chrono::Utc;
@@ -52,7 +52,7 @@ impl AppCore {
     }
 
     fn monitor_state(&self, force_refresh: bool) -> Result<MonitorState, String> {
-        let settings = self.settings()?;
+        let mut settings = self.settings()?;
         let providers = provider_availability(&settings, &self.data_dir);
         let mut app_state = "paused".to_string();
         let mut status_message = "Paused: no provider usage data found yet.".to_string();
@@ -62,6 +62,9 @@ impl AppCore {
             let Some(result) = collect_provider(&provider.provider_id, &settings, &self.data_dir) else {
                 continue;
             };
+            if provider.provider_id == "claude_code" && maybe_auto_calibrate_claude_session(&mut settings, &result.snapshot, &result.totals) {
+                settings = self.save_settings(settings.clone())?;
+            }
             let mut provider_history = self.store.history_points(5, Some(&provider.provider_id))?;
             if force_refresh {
                 if should_append_snapshot(&result.snapshot) {
@@ -151,6 +154,112 @@ fn should_append_snapshot(snapshot: &crate::models::UsageSnapshot) -> bool {
     snapshot.error_state.is_none() || snapshot.source.contains("statusline stale")
 }
 
+fn maybe_auto_calibrate_claude_session(
+    settings: &mut AppSettings,
+    snapshot: &UsageSnapshot,
+    totals: &BTreeMap<String, UsageTotals>,
+) -> bool {
+    if snapshot.provider_id != "claude_code" || snapshot.is_estimate || snapshot.error_state.is_some() {
+        return false;
+    }
+    if !snapshot.source.eq_ignore_ascii_case("Claude Code statusline") {
+        return false;
+    }
+    let Some(percent) = snapshot.session_usage_percent else {
+        return false;
+    };
+    if !percent.is_finite() || percent <= 0.0 || percent >= 100.0 {
+        return false;
+    }
+    let session = totals.get("session").cloned().unwrap_or_else(UsageTotals::empty);
+    let session_tokens = if settings.include_cache_tokens { session.total_tokens } else { session.visible_tokens };
+    if session_tokens <= 0 {
+        return false;
+    }
+    let budget_tokens = ((session_tokens as f64) / (percent / 100.0)).round() as i64;
+    let existing_tokens = settings.claude_session_calibration_tokens.unwrap_or(-1);
+    let existing_percent = settings.claude_session_calibration_percent.unwrap_or(-1.0);
+    if existing_tokens == session_tokens && (existing_percent - percent).abs() < 0.05 {
+        return false;
+    }
+    settings.claude_session_calibration_percent = Some(percent);
+    settings.claude_session_calibration_tokens = Some(session_tokens);
+    settings.claude_session_calibration_budget_tokens = Some(budget_tokens.max(session_tokens + 1));
+    settings.claude_session_calibration_at = Some(Utc::now().to_rfc3339());
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::default_settings;
+    use crate::models::empty_totals_map;
+
+    #[test]
+    fn exact_fresh_claude_statusline_auto_calibrates_session_budget() {
+        let mut settings = default_settings();
+        let mut totals = empty_totals_map();
+        totals.get_mut("session").unwrap().input_tokens = 500;
+        totals.get_mut("session").unwrap().visible_tokens = 500;
+        totals.get_mut("session").unwrap().total_tokens = 500;
+        let snapshot = UsageSnapshot {
+            provider_id: "claude_code".to_string(),
+            provider_name: "Anthropic".to_string(),
+            source: "Claude Code statusline".to_string(),
+            timestamp_utc: Utc::now().to_rfc3339(),
+            model_name: None,
+            input_tokens: 500,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 500,
+            session_usage_percent: Some(25.0),
+            weekly_usage_percent: Some(10.0),
+            session_reset_at: None,
+            weekly_reset_at: None,
+            raw_limit_name: None,
+            is_estimate: false,
+            error_state: None,
+        };
+
+        assert!(maybe_auto_calibrate_claude_session(&mut settings, &snapshot, &totals));
+        assert_eq!(settings.claude_session_calibration_percent, Some(25.0));
+        assert_eq!(settings.claude_session_calibration_tokens, Some(500));
+        assert_eq!(settings.claude_session_calibration_budget_tokens, Some(2000));
+    }
+
+    #[test]
+    fn stale_or_estimated_claude_snapshot_does_not_auto_calibrate() {
+        let mut settings = default_settings();
+        let mut totals = empty_totals_map();
+        totals.get_mut("session").unwrap().input_tokens = 500;
+        totals.get_mut("session").unwrap().visible_tokens = 500;
+        totals.get_mut("session").unwrap().total_tokens = 500;
+        let snapshot = UsageSnapshot {
+            provider_id: "claude_code".to_string(),
+            provider_name: "Anthropic".to_string(),
+            source: "Claude Code local logs (statusline stale)".to_string(),
+            timestamp_utc: Utc::now().to_rfc3339(),
+            model_name: None,
+            input_tokens: 500,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 500,
+            session_usage_percent: Some(25.0),
+            weekly_usage_percent: None,
+            session_reset_at: None,
+            weekly_reset_at: None,
+            raw_limit_name: None,
+            is_estimate: true,
+            error_state: Some("stale".to_string()),
+        };
+
+        assert!(!maybe_auto_calibrate_claude_session(&mut settings, &snapshot, &totals));
+        assert_eq!(settings.claude_session_calibration_percent, None);
+    }
+}
+
 #[tauri::command]
 fn get_monitor_state(core: State<'_, Mutex<AppCore>>) -> Result<MonitorState, String> {
     core.lock().map_err(|_| "App state lock failed.".to_string())?.monitor_state(false)
@@ -236,7 +345,9 @@ fn setup_statusline(app: AppHandle, core: State<'_, Mutex<AppCore>>) -> Result<S
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let cmd = format!("\"{}\" --data-dir \"{}\"", sidecar.display(), data_dir.display());
+    let sidecar_cmd_path = command_path(&sidecar);
+    let data_dir_cmd_path = command_path(&data_dir);
+    let cmd = format!("\"{}\" --data-dir \"{}\"", sidecar_cmd_path, data_dir_cmd_path);
     value["statusLine"] = serde_json::json!({
         "type": "command",
         "command": cmd,
@@ -262,14 +373,15 @@ fn open_usage_page(core: State<'_, Mutex<AppCore>>) -> Result<(), String> {
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| format!("Could not open usage page: {e}"))
 }
 
+fn command_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().trim_start_matches(r"\\?\").to_string()
+}
+
 pub fn run() {
+    let core = AppCore::initialize().expect("failed to initialize Simple AI Usage Monitor state");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            let core = AppCore::initialize().map_err(|e| Box::<dyn std::error::Error>::from(e))?;
-            app.manage(Mutex::new(core));
-            Ok(())
-        })
+        .manage(Mutex::new(core))
         .invoke_handler(tauri::generate_handler![
             get_monitor_state,
             refresh_usage,

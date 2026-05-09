@@ -649,7 +649,7 @@ def read_statusline_record() -> UsageRecord:
             record.weekly_usage_pct = None
             record.session_reset_time = None
             record.weekly_reset_time = None
-            record.error = "Exact Claude statusline data is stale; showing local token-budget estimates from Claude Code logs until Claude Code captures fresh statusline data."
+            record.error = "Exact Claude statusline data is stale because the capture file has not changed; showing local token-budget estimates from Claude Code logs until Claude Code emits fresh statusline data."
     except Exception as e:
         log(f"statusline stale check failed: {e!r}")
     return record

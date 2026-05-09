@@ -273,7 +273,7 @@ fn mark_stale_statusline_for_local_estimates(snapshot: &mut UsageSnapshot) {
     snapshot.session_reset_at = None;
     snapshot.weekly_reset_at = None;
     snapshot.is_estimate = true;
-    snapshot.error_state = Some("Exact Claude statusline data is stale; showing local token-budget estimates from Claude Code logs until Claude Code captures fresh statusline data.".to_string());
+    snapshot.error_state = Some("Exact Claude statusline data is stale because the capture file has not changed; showing local token-budget estimates from Claude Code logs until Claude Code emits fresh statusline data.".to_string());
 }
 
 fn is_stale_statusline_source(source: &str) -> bool {
@@ -342,8 +342,14 @@ fn collect_jsonl_records(
             let Some(record) = parser(&value, provider_name, provider_id, fallback) else {
                 continue;
             };
-            let key = find_first_string(&value, &["requestId", "request_id", "response_id", "message_id", "uuid", "id"])
-                .unwrap_or_else(|| format!("{}:{idx}", path_hash(path)));
+            let key = if provider_id == CODEX_ID {
+                // Codex token_count events include cumulative total_token_usage. Keep one rolling
+                // counter per session file instead of summing every intermediate update.
+                path_hash(path).to_string()
+            } else {
+                find_first_string(&value, &["requestId", "request_id", "response_id", "message_id", "uuid", "id"])
+                    .unwrap_or_else(|| format!("{}:{idx}", path_hash(path)))
+            };
             let replace = records.get(&key).map(|old: &UsageSnapshot| record.total_tokens >= old.total_tokens).unwrap_or(true);
             if replace {
                 records.insert(key, record);
@@ -384,7 +390,7 @@ fn usage_record_from_claude_json(value: &Value, provider_name: &str, provider_id
 }
 
 fn usage_record_from_codex_json(value: &Value, provider_name: &str, provider_id: &str, fallback: i64) -> Option<UsageSnapshot> {
-    let usage = iter_usage_dicts(value).into_iter().next()?;
+    let usage = find_usage_dict_by_preference(value, &["total_token_usage", "last_token_usage", "usage", "token_usage"])?;
     let input_details = usage.get("input_tokens_details").unwrap_or(&Value::Null);
     let input = number(usage.get("input_tokens").or_else(|| usage.get("prompt_tokens")));
     let output = number(usage.get("output_tokens").or_else(|| usage.get("completion_tokens")));
@@ -411,6 +417,28 @@ fn usage_record_from_codex_json(value: &Value, provider_name: &str, provider_id:
         is_estimate: true,
         error_state: None,
     })
+}
+
+fn find_usage_dict_by_preference<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    if let Value::Object(map) = value {
+        for key in keys {
+            if map.get(*key).is_some_and(Value::is_object) {
+                return map.get(*key);
+            }
+        }
+        for child in map.values() {
+            if let Some(found) = find_usage_dict_by_preference(child, keys) {
+                return Some(found);
+            }
+        }
+    } else if let Value::Array(items) = value {
+        for child in items {
+            if let Some(found) = find_usage_dict_by_preference(child, keys) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn bucket_records(records: impl Iterator<Item = UsageSnapshot>, settings: &AppSettings) -> BTreeMap<String, UsageTotals> {
@@ -469,25 +497,6 @@ fn find_usage_dict(value: &Value) -> Option<&Value> {
         }
     }
     None
-}
-
-fn iter_usage_dicts(value: &Value) -> Vec<&Value> {
-    let mut out = Vec::new();
-    if let Value::Object(map) = value {
-        for key in ["last_token_usage", "usage", "current_usage", "token_usage", "total_token_usage"] {
-            if map.get(key).is_some_and(Value::is_object) {
-                out.push(map.get(key).unwrap());
-            }
-        }
-        for child in map.values() {
-            out.extend(iter_usage_dicts(child));
-        }
-    } else if let Value::Array(items) = value {
-        for child in items {
-            out.extend(iter_usage_dicts(child));
-        }
-    }
-    out
 }
 
 fn find_first_value<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
@@ -600,6 +609,33 @@ mod tests {
         assert_eq!(snapshot.input_tokens, 250);
         assert_eq!(snapshot.error_state, None);
         assert_eq!(snapshot.raw_limit_name.as_deref(), Some("OpenAI local fallback estimate from token counters and Codex-sized configured budgets"));
+    }
+
+    #[test]
+    fn codex_parser_prefers_cumulative_total_token_usage() {
+        let value = serde_json::json!({
+            "timestamp": "2026-05-08T22:37:46Z",
+            "payload": {
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 5,
+                        "total_tokens": 105
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 1_000,
+                        "output_tokens": 50,
+                        "total_tokens": 1_050
+                    }
+                }
+            }
+        });
+
+        let snapshot = usage_record_from_codex_json(&value, "OpenAI", CODEX_ID, 0).unwrap();
+
+        assert_eq!(snapshot.input_tokens, 1_000);
+        assert_eq!(snapshot.output_tokens, 50);
+        assert_eq!(snapshot.total_tokens, 1_050);
     }
 
     #[test]

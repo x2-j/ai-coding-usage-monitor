@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import {
   CartesianGrid,
   Line,
@@ -417,6 +417,15 @@ export default function App() {
 
 function WidgetView({ state, trends, onOpen }: { state: MonitorState; trends: UsageTrendMap; onOpen: () => void }) {
   const mode = state.settings.widget_display_mode;
+  useEffect(() => {
+    const providerCount = Math.max(1, state.provider_usages.length);
+    const size = mode === "minimal"
+      ? new LogicalSize(300, 58)
+      : mode === "compact"
+        ? new LogicalSize(300, 72 + providerCount * 56)
+        : new LogicalSize(340, 96 + providerCount * 76);
+    getCurrentWindow().setSize(size).catch(() => undefined);
+  }, [mode, state.provider_usages.length]);
   return (
     <main className={`widget ${mode}`} onDoubleClick={onOpen}>
       <div className="widget-head" data-tauri-drag-region onMouseDown={startWindowDrag} title="Drag to move">
