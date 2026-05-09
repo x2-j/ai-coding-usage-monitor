@@ -18,6 +18,7 @@ import {
   saveSettings,
   setupStatusline
 } from "./api";
+import { FishTankPanel } from "./FishTankPanel";
 import { installTray, showWindow } from "./tray";
 import type { AppSettings, MonitorState, ProviderAvailability, ProviderUsage, UsageTotals, WidgetMode } from "./types";
 
@@ -422,6 +423,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(() => new Set());
   const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(() => new Set());
+  const [settingsCollapsed, setSettingsCollapsed] = useState(false);
   const [trends, setTrends] = useState<UsageTrendMap>({});
   const [notifications, setNotifications] = useState<InternalNotification[]>([]);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
@@ -761,10 +763,15 @@ export default function App() {
         )}
       </section>
 
-      <section className="grid two">
+      <SettingsSection
+        collapsed={settingsCollapsed}
+        onToggle={() => setSettingsCollapsed((value) => !value)}
+      >
         <ProvidersPanel state={state} onEnableCodex={() => enableCodexTracking().then(applyMonitorState)} />
         <SettingsPanel state={state} saving={saving} onSave={updateSettings} />
-      </section>
+      </SettingsSection>
+
+      <FishTankPanel state={state} />
     </main>
   );
 }
@@ -1151,9 +1158,27 @@ function Chart({ title, data, children }: { title: string; data: unknown[]; chil
   );
 }
 
+function SettingsSection({ collapsed, onToggle, children }: { collapsed: boolean; onToggle: () => void; children: React.ReactNode }) {
+  return (
+    <section className={`panel settings-section ${collapsed ? "is-collapsed" : ""}`}>
+      <div className="section-row">
+        <h2>Settings</h2>
+        <button className="icon-toggle" onClick={onToggle} type="button" aria-label={collapsed ? "Show settings" : "Hide settings"}>
+          <ChevronIcon expanded={!collapsed} />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="grid two settings-section-body">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ProvidersPanel({ state, onEnableCodex }: { state: MonitorState; onEnableCodex: () => void }) {
   return (
-    <section className="panel">
+    <section className="settings-subpanel">
       <h2>Providers</h2>
       {state.providers.map((provider) => (
         <div className="provider" key={provider.provider_id}>
@@ -1173,8 +1198,8 @@ function SettingsPanel({ state, saving, onSave }: { state: MonitorState; saving:
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => setDraft((current) => ({ ...current, [key]: value }));
 
   return (
-    <section className="panel settings">
-      <h2>Settings</h2>
+    <section className="settings-subpanel settings">
+      <h2>Preferences</h2>
       <label>Refresh seconds<input type="number" min={1} value={draft.refresh_seconds} onChange={(e) => set("refresh_seconds", Number(e.target.value))} /></label>
       <label>Widget mode
         <select value={draft.widget_display_mode} onChange={(e) => set("widget_display_mode", e.target.value as AppSettings["widget_display_mode"])}>
@@ -1190,6 +1215,37 @@ function SettingsPanel({ state, saving, onSave }: { state: MonitorState; saving:
       <label><input type="checkbox" checked={draft.show_desktop_widget} onChange={(e) => set("show_desktop_widget", e.target.checked)} /> Show widget on startup</label>
       <label>Claude log folder<input value={draft.claude_log_dir} onChange={(e) => set("claude_log_dir", e.target.value)} /></label>
       <label>Codex home<input value={draft.codex_home} onChange={(e) => set("codex_home", e.target.value)} /></label>
+      <fieldset className="settings-group fish-tank-settings">
+        <legend>Fish Tank</legend>
+        <label><input type="checkbox" checked={draft.fish_tank_enabled} onChange={(e) => set("fish_tank_enabled", e.target.checked)} /> Show dashboard fish tank</label>
+        <label>Tokens per food
+          <input
+            type="number"
+            min={1}
+            step={1000}
+            value={draft.fish_tank_food_token_interval}
+            onChange={(e) => set("fish_tank_food_token_interval", Number(e.target.value))}
+          />
+        </label>
+        <label>Tokens per item
+          <input
+            type="number"
+            min={1}
+            step={1_000_000}
+            value={draft.fish_tank_item_token_interval}
+            onChange={(e) => set("fish_tank_item_token_interval", Number(e.target.value))}
+          />
+        </label>
+        <label>Tokens per fish
+          <input
+            type="number"
+            min={1}
+            step={1_000_000}
+            value={draft.fish_tank_fish_token_interval}
+            onChange={(e) => set("fish_tank_fish_token_interval", Number(e.target.value))}
+          />
+        </label>
+      </fieldset>
       <button disabled={saving} onClick={() => onSave(draft)}>{saving ? "Saving..." : "Save Settings"}</button>
     </section>
   );

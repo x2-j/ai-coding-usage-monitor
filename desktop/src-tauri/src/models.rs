@@ -1,6 +1,26 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub fn default_fish_tank_enabled() -> bool {
+    true
+}
+
+pub fn default_fish_tank_food_token_interval() -> i64 {
+    50_000
+}
+
+pub fn default_fish_tank_item_token_interval() -> i64 {
+    20_000_000
+}
+
+pub fn default_fish_tank_fish_token_interval() -> i64 {
+    10_000_000
+}
+
+pub fn default_fish_tank_seed() -> String {
+    format!("fishpx-{}", chrono::Utc::now().timestamp_millis())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageTotals {
     pub input_tokens: i64,
@@ -158,6 +178,16 @@ pub struct AppSettings {
     pub claude_session_calibration_tokens: Option<i64>,
     pub claude_session_calibration_budget_tokens: Option<i64>,
     pub claude_session_calibration_at: Option<String>,
+    #[serde(default = "default_fish_tank_enabled")]
+    pub fish_tank_enabled: bool,
+    #[serde(default = "default_fish_tank_food_token_interval")]
+    pub fish_tank_food_token_interval: i64,
+    #[serde(default = "default_fish_tank_item_token_interval")]
+    pub fish_tank_item_token_interval: i64,
+    #[serde(default = "default_fish_tank_fish_token_interval")]
+    pub fish_tank_fish_token_interval: i64,
+    #[serde(default = "default_fish_tank_seed")]
+    pub fish_tank_seed: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

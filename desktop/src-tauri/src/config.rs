@@ -1,4 +1,4 @@
-use crate::models::AppSettings;
+use crate::models::{default_fish_tank_seed, AppSettings};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -42,6 +42,11 @@ pub fn default_settings() -> AppSettings {
         claude_session_calibration_tokens: None,
         claude_session_calibration_budget_tokens: None,
         claude_session_calibration_at: None,
+        fish_tank_enabled: true,
+        fish_tank_food_token_interval: 50_000,
+        fish_tank_item_token_interval: 20_000_000,
+        fish_tank_fish_token_interval: 10_000_000,
+        fish_tank_seed: default_fish_tank_seed(),
     }
 }
 
@@ -70,6 +75,12 @@ pub fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
     settings.claude_session_calibration_budget_tokens = settings
         .claude_session_calibration_budget_tokens
         .filter(|value| *value > 0);
+    settings.fish_tank_food_token_interval = settings.fish_tank_food_token_interval.max(1);
+    settings.fish_tank_item_token_interval = settings.fish_tank_item_token_interval.max(1);
+    settings.fish_tank_fish_token_interval = settings.fish_tank_fish_token_interval.max(1);
+    if settings.fish_tank_seed.trim().is_empty() {
+        settings.fish_tank_seed = default_fish_tank_seed();
+    }
     settings
 }
 
@@ -107,6 +118,21 @@ pub fn settings_from_legacy_json(value: &Value) -> AppSettings {
     }
     if let Some(v) = value.get("show_desktop_widget").and_then(Value::as_bool) {
         settings.show_desktop_widget = v;
+    }
+    if let Some(v) = value.get("fish_tank_enabled").and_then(Value::as_bool) {
+        settings.fish_tank_enabled = v;
+    }
+    if let Some(v) = value.get("fish_tank_food_token_interval").and_then(Value::as_i64) {
+        settings.fish_tank_food_token_interval = v;
+    }
+    if let Some(v) = value.get("fish_tank_item_token_interval").and_then(Value::as_i64) {
+        settings.fish_tank_item_token_interval = v;
+    }
+    if let Some(v) = value.get("fish_tank_fish_token_interval").and_then(Value::as_i64) {
+        settings.fish_tank_fish_token_interval = v;
+    }
+    if let Some(v) = value.get("fish_tank_seed").and_then(Value::as_str) {
+        settings.fish_tank_seed = v.to_string();
     }
     if let Some(v) = value.get("widget_display_mode").and_then(Value::as_str) {
         settings.widget_display_mode = v.to_string();

@@ -85,6 +85,11 @@ export interface AppSettings {
   claude_session_calibration_tokens: number | null;
   claude_session_calibration_budget_tokens: number | null;
   claude_session_calibration_at: string | null;
+  fish_tank_enabled: boolean;
+  fish_tank_food_token_interval: number;
+  fish_tank_item_token_interval: number;
+  fish_tank_fish_token_interval: number;
+  fish_tank_seed: string;
 }
 
 export interface ChartPoint {
