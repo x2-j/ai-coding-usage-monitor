@@ -503,6 +503,11 @@ function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, s
   const week = usage.totals.week || emptyTotals;
   const [calibrationPercent, setCalibrationPercent] = useState("");
   const knownCalibration = calibration.claude_session_calibration_percent;
+  const resetMs = snapshot.session_reset_at ? new Date(snapshot.session_reset_at).getTime() : NaN;
+  const showCalibration = usage.provider_id === "claude_code"
+    && snapshot.source.includes("statusline stale")
+    && Number.isFinite(resetMs)
+    && resetMs > Date.now();
   return (
     <section className="panel provider-usage">
       <div className="provider-title">
@@ -527,11 +532,14 @@ function ProviderUsagePanel({ collapsed, onToggle, usage, trends, calibration, s
         <MetricCard title="Weekly" trend={trends?.weekly} value={limitValue(snapshot.weekly_usage_percent)} sub={resetLabel(snapshot.weekly_reset_at, snapshot.weekly_usage_percent, snapshot.is_estimate)} />
       </div>
       <ForecastSection usage={usage} />
-      {usage.provider_id === "claude_code" && (
+      {showCalibration && (
         <section className="subsection calibration">
           <div className="section-row">
             <h3><MiniIcon kind="gauge" />Session Calibration</h3>
           </div>
+          <p className="muted">
+            Claude Code has not refreshed exact statusline usage for over 15 minutes, but the last known 5-hour session window has not reset yet. Enter the current Session percentage from the Claude usage page to anchor local token deltas until exact data resumes.
+          </p>
           <div className="calibration-row">
             <label>Known current session %<input type="number" min={0.1} max={99.9} step={0.1} value={calibrationPercent} onChange={(e) => setCalibrationPercent(e.target.value)} /></label>
             <button

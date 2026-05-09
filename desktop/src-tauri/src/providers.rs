@@ -118,7 +118,9 @@ pub fn collect_claude(settings: &AppSettings, data_dir: &Path) -> ProviderResult
             Some(value) => {
                 let mut snapshot = snapshot_from_statusline(&value);
                 if statusline_is_stale(&value, &statusline) {
+                    let session_reset_at = snapshot.session_reset_at.clone();
                     mark_stale_statusline_for_local_estimates(&mut snapshot);
+                    apply_reset_if_no_claude_activity_after_reset(&mut snapshot, settings, session_reset_at.as_deref());
                 }
                 snapshot
             }
@@ -161,7 +163,7 @@ fn apply_token_totals(
         snapshot.is_estimate = true;
         estimated_any = estimated_any || snapshot.weekly_usage_percent.is_some();
     }
-    if estimated_any {
+    if estimated_any && snapshot.raw_limit_name.is_none() {
         snapshot.raw_limit_name = Some("Local fallback estimate from token totals and configured budgets".to_string());
     }
     snapshot.input_tokens = session.input_tokens;
@@ -270,7 +272,7 @@ fn mark_stale_statusline_for_local_estimates(snapshot: &mut UsageSnapshot) {
     snapshot.source = "Claude Code local logs (statusline stale)".to_string();
     snapshot.session_usage_percent = None;
     snapshot.weekly_usage_percent = None;
-    snapshot.session_reset_at = None;
+    snapshot.raw_limit_name = Some("Statusline is stale; session estimate uses local token deltas unless the known reset time has passed with no local activity.".to_string());
     snapshot.weekly_reset_at = None;
     snapshot.is_estimate = true;
     snapshot.error_state = Some("Exact Claude statusline data is stale because the capture file has not changed; showing local token-budget estimates from Claude Code logs until Claude Code emits fresh statusline data.".to_string());
@@ -278,6 +280,40 @@ fn mark_stale_statusline_for_local_estimates(snapshot: &mut UsageSnapshot) {
 
 fn is_stale_statusline_source(source: &str) -> bool {
     source.contains("statusline stale")
+}
+
+fn apply_reset_if_no_claude_activity_after_reset(snapshot: &mut UsageSnapshot, settings: &AppSettings, session_reset_at: Option<&str>) {
+    let Some(reset_at) = session_reset_at.and_then(|value| DateTime::parse_from_rfc3339(value).ok().map(|dt| dt.with_timezone(&Utc))) else {
+        return;
+    };
+    if Utc::now() < reset_at {
+        return;
+    }
+    let tokens_since_reset = claude_tokens_since(settings, reset_at);
+    if tokens_since_reset == 0 {
+        snapshot.session_usage_percent = Some(0.0);
+        snapshot.session_reset_at = None;
+        snapshot.raw_limit_name = Some("Known Claude session reset time has passed and no local Claude activity was found after reset; session usage is reset to 0%.".to_string());
+        snapshot.error_state = None;
+    }
+}
+
+fn claude_tokens_since(settings: &AppSettings, since: DateTime<Utc>) -> i64 {
+    collect_jsonl_records(
+        Path::new(&settings.claude_log_dir),
+        "Anthropic",
+        CLAUDE_ID,
+        usage_record_from_claude_json,
+    )
+    .into_values()
+    .filter(|record| {
+        DateTime::parse_from_rfc3339(&record.timestamp_utc)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc) >= since)
+            .unwrap_or(false)
+    })
+    .map(|record| if settings.include_cache_tokens { record.total_tokens } else { record.input_tokens + record.output_tokens })
+    .sum()
 }
 
 fn scan_claude_logs(settings: &AppSettings) -> BTreeMap<String, UsageTotals> {
@@ -744,6 +780,39 @@ mod tests {
         assert_eq!(snapshot.weekly_usage_percent, Some(25.0));
         assert!(snapshot.error_state.is_some());
         assert_eq!(snapshot.source, "Claude Code local logs (statusline stale)");
+    }
+
+    #[test]
+    fn stale_claude_session_resets_to_zero_after_known_reset_without_activity() {
+        let mut settings = default_settings();
+        settings.claude_log_dir = "__missing_claude_log_dir_for_reset_test__".to_string();
+        let mut snapshot = UsageSnapshot {
+            provider_id: CLAUDE_ID.to_string(),
+            provider_name: "Anthropic".to_string(),
+            source: "Claude Code statusline".to_string(),
+            timestamp_utc: Utc::now().to_rfc3339(),
+            model_name: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 0,
+            session_usage_percent: Some(77.0),
+            weekly_usage_percent: Some(55.0),
+            session_reset_at: Some((Utc::now() - Duration::minutes(5)).to_rfc3339()),
+            weekly_reset_at: None,
+            raw_limit_name: None,
+            is_estimate: false,
+            error_state: None,
+        };
+        let reset_at = snapshot.session_reset_at.clone();
+
+        mark_stale_statusline_for_local_estimates(&mut snapshot);
+        apply_reset_if_no_claude_activity_after_reset(&mut snapshot, &settings, reset_at.as_deref());
+
+        assert_eq!(snapshot.session_usage_percent, Some(0.0));
+        assert_eq!(snapshot.session_reset_at, None);
+        assert_eq!(snapshot.error_state, None);
     }
 
     #[test]
