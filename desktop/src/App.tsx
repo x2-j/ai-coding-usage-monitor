@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import {
   CartesianGrid,
@@ -19,7 +19,7 @@ import {
   setupStatusline
 } from "./api";
 import { installTray, showWindow } from "./tray";
-import type { AppSettings, MonitorState, ProviderUsage, UsageTotals } from "./types";
+import type { AppSettings, MonitorState, ProviderUsage, UsageTotals, WidgetMode } from "./types";
 
 const chartColors = ["#ffd97a", "#8bd3ff", "#ac84ff", "#70e0ad"];
 const tooltipStyle = {
@@ -167,8 +167,53 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M5 5l10 10" />
+      <path d="M15 5L5 15" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M16 8a6 6 0 1 0 1 5" />
+      <path d="M16 8V4" />
+      <path d="M16 8h-4" />
+    </svg>
+  );
+}
+
 function MiniIcon({ kind }: { kind: "clock" | "bolt" | "gauge" | "tokens" | "cache" | "requests" | "provider" }) {
   return <span className={`mini-icon ${kind}`} aria-hidden="true" />;
+}
+
+function limitSeverity(value: number | null | undefined, warning: number, critical: number): UsageTrend["severity"] {
+  if (value === null || value === undefined || Number.isNaN(value)) return "normal";
+  if (value >= critical) return "critical";
+  if (value >= warning) return "warning";
+  return "normal";
+}
+
+function widgetSeverity(state: MonitorState): UsageTrend["severity"] {
+  return state.provider_usages.reduce<UsageTrend["severity"]>((severity, usage) => {
+    const snapshot = usage.snapshot;
+    const session = limitSeverity(
+      snapshot.session_usage_percent,
+      state.settings.session_warning_threshold,
+      state.settings.session_critical_threshold
+    );
+    const weekly = limitSeverity(
+      snapshot.weekly_usage_percent,
+      state.settings.weekly_warning_threshold,
+      state.settings.weekly_critical_threshold
+    );
+    if (session === "critical" || weekly === "critical") return "critical";
+    if (session === "warning" || weekly === "warning" || severity === "warning") return "warning";
+    return severity;
+  }, "normal");
 }
 
 export default function App() {
@@ -256,10 +301,6 @@ export default function App() {
     );
   }
 
-  if (windowLabel === "widget") {
-    return <WidgetView state={state} trends={trends} onOpen={() => showWindow("main")} />;
-  }
-
   async function updateSettings(next: AppSettings) {
     setSaving(true);
     try {
@@ -268,6 +309,18 @@ export default function App() {
     } finally {
       setSaving(false);
     }
+  }
+
+  if (windowLabel === "widget") {
+    return (
+      <WidgetView
+        state={state}
+        trends={trends}
+        onOpen={() => showWindow("main")}
+        onStateChange={applyMonitorState}
+        onUpdateSettings={updateSettings}
+      />
+    );
   }
 
   async function calibrateSession(percent: number) {
@@ -415,25 +468,97 @@ export default function App() {
   );
 }
 
-function WidgetView({ state, trends, onOpen }: { state: MonitorState; trends: UsageTrendMap; onOpen: () => void }) {
+function WidgetView({
+  state,
+  trends,
+  onOpen,
+  onStateChange,
+  onUpdateSettings
+}: {
+  state: MonitorState;
+  trends: UsageTrendMap;
+  onOpen: () => void;
+  onStateChange: (state: MonitorState) => void;
+  onUpdateSettings: (settings: AppSettings) => Promise<void>;
+}) {
   const mode = state.settings.widget_display_mode;
-  useEffect(() => {
-    const providerCount = Math.max(1, state.provider_usages.length);
-    const size = mode === "minimal"
-      ? new LogicalSize(300, 58)
-      : mode === "compact"
-        ? new LogicalSize(300, 72 + providerCount * 56)
-        : new LogicalSize(340, 96 + providerCount * 76);
-    getCurrentWindow().setSize(size).catch(() => undefined);
-  }, [mode, state.provider_usages.length]);
+  const widgetRef = useRef<HTMLElement | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const severity = widgetSeverity(state);
+
+  useLayoutEffect(() => {
+    const element = widgetRef.current;
+    if (!element) return;
+    const minWidth = mode === "minimal" ? 330 : mode === "compact" ? 360 : 390;
+    const maxWidth = mode === "minimal" ? 720 : 560;
+    const minHeight = mode === "minimal" ? 58 : 92;
+    let frame = 0;
+    const resizeToContent = () => {
+      frame = window.requestAnimationFrame(() => {
+        const width = Math.min(maxWidth, Math.max(minWidth, Math.ceil(element.scrollWidth + 2)));
+        const height = Math.max(minHeight, Math.ceil(element.scrollHeight + 2));
+        getCurrentWindow().setSize(new LogicalSize(width, height)).catch(() => undefined);
+      });
+    };
+    resizeToContent();
+    const observer = new ResizeObserver(resizeToContent);
+    observer.observe(element);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [mode, state.provider_usages, state.status_message, trends]);
+
+  async function closeWidget() {
+    await getCurrentWindow().hide();
+  }
+
+  async function refreshWidget() {
+    setRefreshing(true);
+    try {
+      onStateChange(await refreshUsage());
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function setWidgetMode(nextMode: WidgetMode) {
+    if (nextMode === mode) return;
+    await onUpdateSettings({ ...state.settings, widget_display_mode: nextMode });
+  }
+
   return (
-    <main className={`widget ${mode}`} onDoubleClick={onOpen}>
+    <main ref={widgetRef} className={`widget ${mode} ${severity}`} onDoubleClick={onOpen}>
       <div className="widget-head" data-tauri-drag-region onMouseDown={startWindowDrag} title="Drag to move">
-        <span className="logo-dot" />
-        <strong>AI Usage</strong>
+        <div className="widget-title">
+          <span className="logo-dot" />
+          <strong>AI Usage</strong>
+        </div>
+        <div className="widget-controls" onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+          <div className="widget-mode-tabs" role="group" aria-label="Widget display mode">
+            {(["full", "compact", "minimal"] as WidgetMode[]).map((option) => (
+              <button
+                aria-label={`Use ${option} widget mode`}
+                className={option === mode ? "active" : ""}
+                key={option}
+                onClick={() => setWidgetMode(option)}
+                title={`${option[0].toUpperCase()}${option.slice(1)} mode`}
+                type="button"
+              >
+                {option === "full" ? "F" : option === "compact" ? "C" : "M"}
+              </button>
+            ))}
+          </div>
+          <button className="widget-icon-button" disabled={refreshing} onClick={refreshWidget} title="Refresh usage" type="button" aria-label="Refresh usage">
+            <RefreshIcon />
+          </button>
+          <button className="widget-icon-button" onClick={closeWidget} title="Close widget" type="button" aria-label="Close widget">
+            <CloseIcon />
+          </button>
+        </div>
       </div>
       {mode === "minimal" ? (
-        <p>{state.provider_usages.map((usage) => `${usage.display_label}: ${limitValue(usage.snapshot.session_usage_percent)}`).join(" | ") || "No data"}</p>
+        <p className="widget-minimal-line">{state.provider_usages.map((usage) => `${usage.display_label}: ${limitValue(usage.snapshot.session_usage_percent)}`).join(" | ") || "No data"}</p>
       ) : (
         <>
           {state.provider_usages.map((usage) => (
